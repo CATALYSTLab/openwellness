@@ -1,6 +1,7 @@
-"""Google Health in ``ow_api`` (opserver Phase 10.1, GHA-01, GHA-02).
+"""Google Health in ``ow_api`` (opserver Phase 10.1, GHA-01, GHA-02; Phase 16, GHB-02).
 
-Four routes, all under the edge group ``/api/googleHealth`` (D-05):
+Four routes under the edge group ``/api/googleHealth`` (D-05), and one
+internal route outside ``/api/``:
 
 - ``POST /api/googleHealth/links``: staff mint a participant-bound link.
   Router-level ``require_write_principal`` plus the ``admin`` role, behind
@@ -14,6 +15,12 @@ Four routes, all under the edge group ``/api/googleHealth`` (D-05):
   unauthenticated by marker; it checks the shared ``Authorization`` secret
   and the ``GOOGLE-HEALTH-API-SIGNATURE`` itself and only enqueues
   (:mod:`.notifications`).
+- ``POST /internal/googleHealth/links``: frame mints a link for a coach over
+  the Compose network (opserver Phase 16, D-01..D-04, D-10). Guarded by a
+  per-request bridge JWT (:func:`.bridge.require_bridge_credential`), not by
+  ``require_write_principal`` and not by the unauthenticated marker; edge
+  never routes the path. It answers Boom JSON and writes one audit line per
+  attempt (:mod:`.bridge`).
 
 The routes read ``app.state.google_health_deps``, built in the lifespan by
 :func:`build_google_health_deps`. While a required setting is unset or
@@ -33,6 +40,7 @@ from ..errors.responses import build_error
 from ..event_handlers.celery_producer import CeleryTaskPublisher, ProducerSettings
 from ..event_handlers.mongo_readers import MongoParticipantReader
 from ..event_handlers.ports import TaskPublisher
+from .bridge import INTERNAL_LINKS_PATH, build_bridge_deps, create_link_internal
 from .google_client import GoogleOAuthClient, RequestsGoogleOAuthClient
 from .notifications import build_notifications_router
 from .oauth import (
@@ -54,7 +62,9 @@ AUTHORIZE_PATH = "/api/googleHealth/authorize"
 FINISH_AUTH_PATH = "/api/googleHealth/finishAuth"
 
 __all__ = [
+    "INTERNAL_LINKS_PATH",
     "GoogleHealthDeps",
+    "build_bridge_deps",
     "build_google_health_deps",
     "build_google_health_router",
     "get_google_health_deps",
@@ -93,9 +103,19 @@ def build_google_health_router() -> APIRouter:
         openapi_extra={ALLOW_UNAUTHENTICATED: True},
     )
 
+    # Phase 16 D-02: no router-level dependencies. The handler checks the
+    # deps, the bridge and the credential itself so every exit is audited
+    # and answers Boom JSON; require_google_health_enabled would raise an
+    # AIP-193 envelope instead.
+    internal = APIRouter()
+    internal.add_api_route(
+        INTERNAL_LINKS_PATH, create_link_internal, methods=["POST"], include_in_schema=False
+    )
+
     router = APIRouter()
     router.include_router(staff)
     router.include_router(browser)
+    router.include_router(internal)
     router.include_router(build_notifications_router())
     return router
 

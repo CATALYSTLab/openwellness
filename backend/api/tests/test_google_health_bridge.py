@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+import urllib.parse
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -124,8 +125,12 @@ def test_valid_bridge_token_mints_a_link(h: Harness, audit: _Collect) -> None:
         f"googleHealth/internalLinks outcome=ok actor={ACTOR} participantId={pid} "
         f"expiresAt={body['expiresAt']}"
     ]
+    # ``expiresAt=`` itself contains "t=", so look for the query form and
+    # the link token value instead.
+    link_token = urllib.parse.parse_qs(urllib.parse.urlsplit(body["url"]).query)["t"][0]
     assert body["url"] not in audit.lines()[0]
-    assert "t=" not in audit.lines()[0]
+    assert "?t=" not in audit.lines()[0]
+    assert link_token not in audit.lines()[0]
 
 
 def test_missing_bridge_credential_is_401(h: Harness, audit: _Collect) -> None:
