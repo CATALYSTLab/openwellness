@@ -169,6 +169,10 @@ def require_bridge_credential(request: Request) -> str | None:
     return token
 
 
+def install_google_health_audit_logger() -> None:
+    """Interface skeleton; the stdout handler lands with the implementation."""
+
+
 def _audit(
     outcome: str, actor: str | None, participant_id: str | None, expires_at: int | None
 ) -> None:

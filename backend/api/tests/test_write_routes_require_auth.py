@@ -3,6 +3,11 @@
 The only unauthenticated write surface is the six ``/v1/auth:*`` routes and
 the externally registered event-handler contracts (HOOK-01/02), which answer
 Sync Gateway and vendor webhooks exactly as frame's ``auth: false`` routes do.
+
+A third, reviewed category is bridge-guarded: the Google Health internal links
+route (opserver Phase 16) takes a per-request bridge JWT from frame through
+``require_bridge_credential`` instead of a ``require_write_principal`` bearer.
+It is never unauthenticated and edge never routes its path.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from openwellness_api.deps.principal import (
     WRITE_METHODS,
     require_write_principal,
 )
+from openwellness_api.google_health.bridge import require_bridge_credential
 from openwellness_api.main import create_app
 
 
@@ -50,6 +56,11 @@ EXPECTED_READ_ONLY = {
     "/v1/studies:lookup",
 }
 
+# Routes guarded by the frame -> ow bridge JWT (opserver Phase 16, D-01..D-03).
+EXPECTED_BRIDGE_GUARDED = {
+    "/internal/googleHealth/links",
+}
+
 
 def _write_routes() -> list[APIRoute]:
     return [
@@ -65,6 +76,7 @@ def test_every_write_route_is_guarded_or_explicitly_exempt() -> None:
     unguarded: list[str] = []
     exempt: set[str] = set()
     read_only: set[str] = set()
+    bridge_guarded: set[str] = set()
 
     for route in _write_routes():
         extra = route.openapi_extra or {}
@@ -73,6 +85,12 @@ def test_every_write_route_is_guarded_or_explicitly_exempt() -> None:
             continue
         if extra.get(READ_ONLY):
             read_only.add(route.path)
+            continue
+        if any(
+            dependency.call is require_bridge_credential
+            for dependency in route.dependant.dependencies
+        ):
+            bridge_guarded.add(route.path)
             continue
         if not any(
             dependency.call is require_write_principal
@@ -83,6 +101,28 @@ def test_every_write_route_is_guarded_or_explicitly_exempt() -> None:
     assert unguarded == [], unguarded
     assert exempt == EXPECTED_EXEMPTIONS
     assert read_only == EXPECTED_READ_ONLY
+    assert bridge_guarded == EXPECTED_BRIDGE_GUARDED
+
+
+def test_bridge_guarded_route_is_neither_unauthenticated_nor_write_principal() -> None:
+    routes = [
+        route
+        for route in create_app().routes
+        if isinstance(route, APIRoute) and route.path in EXPECTED_BRIDGE_GUARDED
+    ]
+    assert {route.path for route in routes} == EXPECTED_BRIDGE_GUARDED
+    for route in routes:
+        extra = route.openapi_extra or {}
+        assert not extra.get(ALLOW_UNAUTHENTICATED)
+        assert not extra.get(READ_ONLY)
+        assert not any(
+            dependency.call is require_write_principal
+            for dependency in get_flat_dependant(route.dependant).dependencies
+        )
+        assert any(
+            dependency.call is require_bridge_credential
+            for dependency in route.dependant.dependencies
+        )
 
 
 def test_the_route_inventory_has_not_silently_shrunk() -> None:
