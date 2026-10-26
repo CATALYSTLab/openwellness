@@ -22,8 +22,10 @@ through the same :func:`~.oauth._mint_link_result` code as the public
 
 from __future__ import annotations
 
+import hmac
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from typing import Annotated, Any, Final
 
@@ -36,7 +38,7 @@ from starlette.responses import Response
 
 from ..event_handlers.hapi import boom
 from .oauth import _mint_link_result, get_google_health_deps
-from .settings import GoogleHealthSettings
+from .settings import _MIN_SECRET_LENGTH, GoogleHealthSettings
 
 INTERNAL_LINKS_PATH: Final = "/internal/googleHealth/links"
 BRIDGE_ISSUER: Final = "frame"
@@ -48,6 +50,8 @@ AUDIT_LOGGER_NAME: Final = "openwellness_api.audit.google_health"
 
 _HEX24: Final = re.compile(r"[0-9a-f]{24}")
 _REQUIRED_CLAIMS: Final = ["exp", "iat", "iss", "aud", "sub", "jti"]
+_GOOGLE_HEALTH_SECRETS: Final = ("link_secret", "state_secret", "webhook_secret", "client_secret")
+_AUDIT_HANDLER_MARK: Final = "_openwellness_google_health_audit"
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger(AUDIT_LOGGER_NAME)
@@ -65,11 +69,38 @@ class BridgeSettings(BaseSettings):
 
     secret: str = Field(default="", repr=False)
 
-    def problems(self) -> list[str]:
-        """Names of the violated rules, never a value (D-04)."""
+    def problems(
+        self,
+        *,
+        auth_jwt_secret: str,
+        auth_code_pepper: str,
+        google_health: GoogleHealthSettings,
+    ) -> list[str]:
+        """Names of the violated rules, never a value (D-04).
+
+        The bridge secret must be set, at least 32 characters (the floor of
+        every other ow secret), and distinct from ``API_AUTH_JWT_SECRET``,
+        ``API_AUTH_CODE_PEPPER`` and every Google Health secret, so a leak of
+        one can never mint as the other.
+        """
         if not self.secret:
             return ["bridge_secret_unset"]
-        return []
+        rules: list[str] = []
+        if len(self.secret) < _MIN_SECRET_LENGTH:
+            rules.append("bridge_secret_short")
+        if any(_same(self.secret, other) for other in (auth_jwt_secret, auth_code_pepper)):
+            rules.append("bridge_secret_reuses_api_auth_secret")
+        if any(
+            _same(self.secret, getattr(google_health, name))
+            for name in _GOOGLE_HEALTH_SECRETS
+        ):
+            rules.append("bridge_secret_reuses_google_health_secret")
+        return rules
+
+
+def _same(secret: str, other: str) -> bool:
+    """Constant-time equality against a non-empty secret."""
+    return bool(other) and hmac.compare_digest(secret.encode("utf-8"), other.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -137,9 +168,20 @@ def build_bridge_deps(
     auth_code_pepper: str,
     settings: BridgeSettings | None = None,
 ) -> BridgeDeps:
-    """The internal route's verifier, or the rules that keep it disabled (D-04)."""
+    """The internal route's verifier, or the rules that keep it disabled (D-04).
+
+    Any violated rule logs one WARNING listing rule names only, never a
+    value, and makes only the internal route answer 503; the public Google
+    Health routes are unaffected. Mirrors :func:`build_google_health_deps`.
+    """
     bridge = settings if settings is not None else BridgeSettings()
-    rules = tuple(bridge.problems())
+    rules = tuple(
+        bridge.problems(
+            auth_jwt_secret=auth_jwt_secret,
+            auth_code_pepper=auth_code_pepper,
+            google_health=google_health,
+        )
+    )
     if rules:
         logger.warning(
             "googleHealth internal links disabled until fixed: %s", ", ".join(rules)
@@ -170,7 +212,20 @@ def require_bridge_credential(request: Request) -> str | None:
 
 
 def install_google_health_audit_logger() -> None:
-    """Interface skeleton; the stdout handler lands with the implementation."""
+    """Give the audit logger its own stdout handler (idempotent).
+
+    uvicorn configures only its own loggers, and the root logger stays at
+    WARNING, so an ``openwellness_api.*`` INFO line never reaches stdout.
+    The audit line needs its own handler to reach Promtail and Loki (D-10).
+    ``propagate=False`` keeps it from being written twice.
+    """
+    if not any(getattr(h, _AUDIT_HANDLER_MARK, False) for h in audit_logger.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        setattr(handler, _AUDIT_HANDLER_MARK, True)
+        audit_logger.addHandler(handler)
+    audit_logger.setLevel(logging.INFO)
+    audit_logger.propagate = False
 
 
 def _audit(
