@@ -272,6 +272,11 @@ async def create_link_internal(
 async def _create_link_internal(
     request: Request, token: str | None, attempt: _Attempt
 ) -> Response:
+    # No bearer token at all: refuse before the 503 and the body checks, so
+    # a caller without one learns nothing about configuration and cannot put
+    # a participantId into the audit line.
+    if token is None:
+        return boom(401, "Invalid bridge credential")
     deps = get_google_health_deps(request)
     bridge = get_bridge_deps(request)
     if (

@@ -151,8 +151,29 @@ def test_missing_bridge_credential_is_401(h: Harness, audit: _Collect) -> None:
         "error": "Unauthorized",
         "message": "Invalid bridge credential",
     }
+    # Refused before the body is read, so no participantId reaches the line.
     assert audit.lines() == [
-        f"googleHealth/internalLinks outcome=401 actor=- participantId={pid} expiresAt=-"
+        "googleHealth/internalLinks outcome=401 actor=- participantId=- expiresAt=-"
+    ]
+
+
+def test_missing_bridge_credential_is_401_before_503(audit: _Collect) -> None:
+    h = with_bridge(Harness(), secret="")
+    pid = h.seed_participant()
+    resp = h.client().post(INTERNAL_LINKS_PATH, json={"participantId": pid})
+
+    assert resp.status_code == 401, resp.text
+    assert audit.lines() == [
+        "googleHealth/internalLinks outcome=401 actor=- participantId=- expiresAt=-"
+    ]
+
+
+def test_missing_bridge_credential_is_401_before_400(h: Harness, audit: _Collect) -> None:
+    resp = h.client().post(INTERNAL_LINKS_PATH, json={"participantId": "not-hex"})
+
+    assert resp.status_code == 401, resp.text
+    assert audit.lines() == [
+        "googleHealth/internalLinks outcome=401 actor=- participantId=- expiresAt=-"
     ]
 
 
@@ -206,6 +227,7 @@ REFUSALS: dict[str, Callable[[Harness, str], dict[str, str]]] = {
     "basic_scheme": lambda h, pid: {"Authorization": "Basic c2Vzc2lvbjprZXk="},
     "empty_bearer": lambda h, pid: {"Authorization": "Bearer "},
 }
+NO_BEARER_TOKEN = {"basic_scheme", "empty_bearer"}
 
 
 @pytest.mark.parametrize("case", sorted(REFUSALS))
@@ -221,8 +243,10 @@ def test_bridge_token_refusals(h: Harness, audit: _Collect, case: str) -> None:
         "error": "Unauthorized",
         "message": "Invalid bridge credential",
     }
+    # A header that yields no bearer token is refused before the body is read.
+    logged_pid = "-" if case in NO_BEARER_TOKEN else pid
     assert audit.lines() == [
-        f"googleHealth/internalLinks outcome=401 actor=- participantId={pid} expiresAt=-"
+        f"googleHealth/internalLinks outcome=401 actor=- participantId={logged_pid} expiresAt=-"
     ]
 
 

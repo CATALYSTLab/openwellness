@@ -90,6 +90,7 @@ The audit line needs the link's `expiresAt` without parsing the URL. `_mint_link
 
 | Step | Failure | Answer |
 |---|---|---|
+| `Authorization` yields a bearer token (`require_bridge_credential`) | missing, not `Bearer`, or empty | 401 `Invalid bridge credential` |
 | Google Health deps present and enabled; bridge deps present, enabled, with a verifier | any is not | 503 `Google Health is not available.` |
 | Body is a JSON object whose `participantId` is 24 lowercase hex | not | 400 `Invalid request payload input` |
 | `BridgeVerifier.verify(token, participant_id=...)` | `BridgeTokenError` | 401 `Invalid bridge credential` |
@@ -106,7 +107,7 @@ googleHealth/internalLinks outcome=<ok|400|401|404|409|500|503> actor=<24hex|-> 
 ```
 
 - One line on every exit, including an unexpected exception.
-- `actor` is set only from a verified JWT. `participantId` is set only after the body id matched the regex, so a crafted id cannot inject log content. `expiresAt` is set only for `ok`.
+- `actor` is set only from a verified JWT. `participantId` is set only after a bearer token is present and the body id matched the regex, so a caller without a token leaves `-` and a crafted id cannot inject log content. `expiresAt` is set only for `ok`.
 - Fixed keys in logfmt, so a LogQL `| logfmt` stage parses it.
 - Logger `openwellness_api.audit.google_health`. uvicorn configures only its own loggers and the root logger stays at WARNING, so an `openwellness_api.*` INFO line would never reach stdout. `install_google_health_audit_logger()` gives this logger its own `StreamHandler(sys.stdout)` with formatter `%(message)s`, level INFO and `propagate=False`, marked so a second call adds nothing. The lifespan calls it; stdout reaches the consuming project's Promtail and Loki under six-year retention.
 - The handler never logs the request body, the response body, the URL or a token. The startup WARNING names rules, never a value.
@@ -133,7 +134,7 @@ googleHealth/internalLinks outcome=<ok|400|401|404|409|500|503> actor=<24hex|-> 
 
 All under `backend/api/tests`, with the spec 008 fakes (`google_health_harness.Harness`: mongomock, fakeredis, a fake Google client):
 
-- `test_google_health_bridge.py`: the tracer mint and the missing-credential 401; 15 refusal cases; eight disable rules, each with the public route still answering 200; Google Health disabled; the name-only WARNING; six bad bodies; 404, 409 and 500 audited with the actor; one audit line per request; no record on root or the audit logger carrying the URL, `?t=`, the link token or the bridge token; the logger installer's idempotence; the path outside `/api/`.
+- `test_google_health_bridge.py`: the tracer mint and the missing-credential 401, also ahead of a 503 and a 400; 15 refusal cases; eight disable rules, each with the public route still answering 200; Google Health disabled; the name-only WARNING; six bad bodies; 404, 409 and 500 audited with the actor; one audit line per request; no record on root or the audit logger carrying the URL, `?t=`, the link token or the bridge token; the logger installer's idempotence; the path outside `/api/`.
 - `test_write_routes_require_auth.py`: `EXPECTED_BRIDGE_GUARDED == {"/internal/googleHealth/links"}`, and that route carries neither the unauthenticated marker nor `require_write_principal`.
 - pytest's `caplog` hangs off the root logger and cannot see a `propagate=False` logger, so the audit tests attach their own handler to `openwellness_api.audit.google_health`.
 
