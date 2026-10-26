@@ -188,19 +188,35 @@ async def create_link(
 
 
 def _mint_link(deps: GoogleHealthDeps, participant_id: str) -> Response:
+    return _mint_link_result(deps, participant_id)[0]
+
+
+def _mint_link_result(deps: GoogleHealthDeps, participant_id: str) -> tuple[Response, int | None]:
+    """The link response and its ``expiresAt``, or ``None`` on any refusal.
+
+    The single minting implementation, shared by the public route and the
+    bridge-guarded internal route (:mod:`.bridge`), which audits the expiry
+    without reading the URL.
+    """
     try:
         participant = _participant(deps, participant_id)
         if participant is None:
-            return boom(404, "Participant not found.")
+            return boom(404, "Participant not found."), None
         if _held(deps, participant):
             logger.warning("googleHealth/links held")
-            return boom(409, "The participant's study is on hold for Google Health migration.")
+            return (
+                boom(409, "The participant's study is on hold for Google Health migration."),
+                None,
+            )
         token, exp = deps.tokens.mint_link(participant_id)
     except Exception as exc:
         logger.error("googleHealth/links failed: %s", type(exc).__name__)
-        return boom(500, "An internal server error occurred")
+        return boom(500, "An internal server error occurred"), None
     url = deps.settings.authorize_url() + "?" + urllib.parse.urlencode({"t": token})
-    return JSONResponse({"url": url, "expiresAt": exp}, headers={"Cache-Control": "no-store"})
+    response = JSONResponse(
+        {"url": url, "expiresAt": exp}, headers={"Cache-Control": "no-store"}
+    )
+    return response, exp
 
 
 # --- GET /api/googleHealth/authorize ------------------------------------------

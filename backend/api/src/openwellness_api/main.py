@@ -28,7 +28,12 @@ from .errors.handlers import register_exception_handlers
 from .event_handlers import build_event_handler_deps, build_event_handlers_router
 from .event_handlers.celery_producer import ProducerSettings
 from .frame_participants import build_frame_participant_deps, build_frame_participants_router
-from .google_health import build_google_health_deps, build_google_health_router
+from .google_health import (
+    build_bridge_deps,
+    build_google_health_deps,
+    build_google_health_router,
+)
+from .google_health.bridge import install_google_health_audit_logger
 from .resources import RESOURCE_MODULES
 from .v1 import build_v1_router
 
@@ -107,6 +112,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # T-10.1-17: the Google Health authorize and finishAuth URLs carry a link
     # token, an OAuth code and a state in their query strings.
     install_google_health_access_log_filter()
+    # Phase 16 D-10: the internal links audit line is INFO on its own
+    # logger, which needs its own stdout handler to reach Loki.
+    install_google_health_audit_logger()
 
     # --- Auth feature wiring (settings + boot guard) -------------------- #
     auth_container = AuthContainer()
@@ -191,6 +199,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             redis=redis_client,
             producer_settings=ProducerSettings(),
             auth_signing_secret=s.jwt_secret,
+        )
+        # Phase 16 D-01/D-04/D-10: the frame -> ow bridge for the internal
+        # links route. An unset, short or reused GOOGLE_HEALTH_BRIDGE_SECRET
+        # logs one WARNING naming the rules (never a value) and makes only
+        # POST /internal/googleHealth/links answer 503.
+        app.state.google_health_bridge = build_bridge_deps(
+            google_health=app.state.google_health_deps.settings,
+            auth_jwt_secret=s.jwt_secret,
+            auth_code_pepper=s.code_pepper,
         )
 
         yield
