@@ -25,6 +25,8 @@ class MongoFitbit(MongoBaseEntity):
     # The contract's D-13 fields (opserver docs/google-health.md). Each
     # defaults to None so an existing legacy document loads unchanged; the
     # repository drops them from writes while None (MongoFitbitRepository._to_doc).
+    # devices / devicesFetchedAt are the paired-device snapshot schedulernew's
+    # activity sync writes on Google records.
     provider: Any = Field(alias="provider", default=None)
     expires_at: Any = Field(alias="expiresAt", default=None)
     scope: Any = Field(alias="scope", default=None)
@@ -36,3 +38,5 @@ class MongoFitbit(MongoBaseEntity):
     migration_status: Any = Field(alias="migrationStatus", default=None)
     reconsent_required_at: Any = Field(alias="reconsentRequiredAt", default=None)
     last_sync_at: Any = Field(alias="lastSyncAt", default=None)
+    devices: Any = Field(alias="devices", default=None)
+    devices_fetched_at: Any = Field(alias="devicesFetchedAt", default=None)
