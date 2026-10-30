@@ -46,6 +46,8 @@ D13_SNAKE = (
     "migration_status",
     "reconsent_required_at",
     "last_sync_at",
+    "devices",
+    "devices_fetched_at",
 )
 
 
@@ -265,6 +267,8 @@ CONTRACT_D13 = (
     "migrationStatus",
     "reconsentRequiredAt",
     "lastSyncAt",
+    "devices",
+    "devicesFetchedAt",
 )
 
 
@@ -372,6 +376,15 @@ def test_creating_a_legacy_entity_writes_no_d13_keys():
         assert alias not in stored, alias
 
 
+# One paired device in the five-key legacy shape schedulernew stores.
+DEVICE: dict[str, Any] = {
+    "deviceVersion": "Charge 6",
+    "type": "TRACKER",
+    "lastSyncTime": "2026-10-06T13:01:40.000",
+    "battery": "High",
+    "batteryLevel": 80,
+}
+
 GOOGLE_VALUES: dict[str, Any] = {
     "provider": PROVIDER_GOOGLE_HEALTH,
     "expires_at": 1_800_000_000,
@@ -384,6 +397,8 @@ GOOGLE_VALUES: dict[str, Any] = {
     "migration_status": "complete",
     "reconsent_required_at": 1_792_000_000,
     "last_sync_at": 1_791_000_000,
+    "devices": [DEVICE],
+    "devices_fetched_at": 1_791_000_100,
 }
 ALIAS_OF: dict[str, str] = dict(zip(D13_SNAKE, CONTRACT_D13))
 
@@ -420,6 +435,24 @@ def test_mongo_fitbit_round_trips_d13_fields_by_alias():
     entity = model.to_domain(Fitbit)
     for name, value in GOOGLE_VALUES.items():
         assert getattr(entity, name) == value, name
+
+
+def test_saving_a_loaded_google_record_keeps_the_device_snapshot():
+    fake, repo = make_repo()
+    google_id = fake.db.fitbits.insert_one(
+        google_doc(devices=[DEVICE], devicesFetchedAt=1_791_000_100)
+    ).inserted_id
+
+    record = repo.get_by_participant_id(P)
+    assert record is not None
+    record.access_token = "refreshed-access"
+    repo.save(record, actor="test")
+
+    after = fake.db.fitbits.find_one({"_id": google_id})
+    assert after is not None
+    assert after["accessToken"] == "refreshed-access"
+    assert after["devices"] == [DEVICE]
+    assert after["devicesFetchedAt"] == 1_791_000_100
 
 
 def test_superseded_record_stays_visible_to_audit_reads():
