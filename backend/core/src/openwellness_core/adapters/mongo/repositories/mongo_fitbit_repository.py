@@ -16,6 +16,10 @@ from ...interfaces.collection_repository import CollectionRepository
 from ..model.mongo_fitbit import MongoFitbit
 from .mongo_base_repository import MongoBaseRepository
 
+# schedulernew alone writes these, under a devicesFetchedAt guard; OpenWellness
+# reads them but never writes them, so a save can't overwrite a newer snapshot.
+_SCHEDULER_OWNED: tuple[str, ...] = ("devices", "devicesFetchedAt")
+
 
 class MongoFitbitRepository(
     MongoBaseRepository[SomeFitbit, MongoFitbit],
@@ -34,7 +38,8 @@ class MongoFitbitRepository(
         self.entity_type: Type[SomeFitbit] = entity_type
 
     def _to_doc(self, entity: SomeFitbit) -> dict:
-        """Serialize ``entity``, leaving out every D-13 key whose value is None.
+        """Serialize ``entity``, leaving out every D-13 key whose value is None
+        and the scheduler-owned device snapshot keys.
 
         Used by both ``create`` and ``save``. A legacy record loaded and saved
         through OpenWellness keeps its stored shape: no ``provider: null`` or
@@ -45,6 +50,8 @@ class MongoFitbitRepository(
         for alias in D13_ALIASES:
             if doc.get(alias, 0) is None:
                 del doc[alias]
+        for alias in _SCHEDULER_OWNED:
+            doc.pop(alias, None)
         return doc
 
     def get_by_participant_id(self, participant_id: str) -> SomeFitbit | None:

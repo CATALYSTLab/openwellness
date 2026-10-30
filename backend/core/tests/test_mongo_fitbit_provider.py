@@ -413,12 +413,16 @@ def test_google_entity_round_trips_every_d13_field_by_alias():
     stored = fake.db.fitbits.find_one({"participantId": P})
     assert stored is not None
     for name, value in GOOGLE_VALUES.items():
-        assert stored[ALIAS_OF[name]] == value, name
-        assert getattr(created, name) == value, name
+        if ALIAS_OF[name] in ("devices", "devicesFetchedAt"):
+            assert ALIAS_OF[name] not in stored, name  # schedulernew-owned
+        else:
+            assert stored[ALIAS_OF[name]] == value, name
+            assert getattr(created, name) == value, name
     loaded = repo.get_by_id(str(created.id))
     assert loaded is not None
     for name, value in GOOGLE_VALUES.items():
-        assert getattr(loaded, name) == value, name
+        if ALIAS_OF[name] not in ("devices", "devicesFetchedAt"):
+            assert getattr(loaded, name) == value, name
 
 
 def test_mongo_fitbit_round_trips_d13_fields_by_alias():
@@ -437,7 +441,7 @@ def test_mongo_fitbit_round_trips_d13_fields_by_alias():
         assert getattr(entity, name) == value, name
 
 
-def test_saving_a_loaded_google_record_keeps_the_device_snapshot():
+def test_saving_a_loaded_google_record_keeps_a_newer_scheduler_snapshot():
     fake, repo = make_repo()
     google_id = fake.db.fitbits.insert_one(
         google_doc(devices=[DEVICE], devicesFetchedAt=1_791_000_100)
@@ -445,14 +449,21 @@ def test_saving_a_loaded_google_record_keeps_the_device_snapshot():
 
     record = repo.get_by_participant_id(P)
     assert record is not None
+    assert record.devices == [DEVICE]
+    # schedulernew stores a newer snapshot between OpenWellness's load and save.
+    newer = {**DEVICE, "battery": "Low"}
+    fake.db.fitbits.update_one(
+        {"_id": google_id},
+        {"$set": {"devices": [newer], "devicesFetchedAt": 1_791_000_200}},
+    )
     record.access_token = "refreshed-access"
     repo.save(record, actor="test")
 
     after = fake.db.fitbits.find_one({"_id": google_id})
     assert after is not None
     assert after["accessToken"] == "refreshed-access"
-    assert after["devices"] == [DEVICE]
-    assert after["devicesFetchedAt"] == 1_791_000_100
+    assert after["devices"] == [newer]
+    assert after["devicesFetchedAt"] == 1_791_000_200
 
 
 def test_superseded_record_stays_visible_to_audit_reads():
