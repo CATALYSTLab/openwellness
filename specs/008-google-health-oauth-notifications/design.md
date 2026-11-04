@@ -116,8 +116,8 @@ The scheduler's `completeMigration` is idempotent, re-supersedes any ACTIVE reco
 
 The receiver follows the enqueue-and-return rule of spec 007: no Mongo read, no write. Order:
 
-1. Bounded raw read, 64 KiB, else 413 (before any credential check, so an oversized body costs nothing).
-2. `hmac.compare_digest` on `Authorization` against `GOOGLE_HEALTH_WEBHOOK_SECRET`, else 401.
+1. `hmac.compare_digest` on `Authorization` against `GOOGLE_HEALTH_WEBHOOK_SECRET`, else 401. An oversized request without the secret is 401 and not read.
+2. Bounded raw read, 64 KiB, else 413. The secret check runs first, so a 413 proves the sender held the secret.
 3. `{"type": "verification"}` answers 200 with an empty body (Google's subscriber handshake accepts 200 or 201 and reads no body; the secret is never echoed).
 4. The signature over the exact raw bytes, in the threadpool: invalid is 401, unavailable key is 503.
 5. Parse: one object or an array of 1..100 items, else 400. An item that fails validation is dropped with a WARNING count; redelivery cannot fix it, so a signed body whose every item is invalid still answers 204.

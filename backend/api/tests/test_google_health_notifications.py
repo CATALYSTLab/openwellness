@@ -391,6 +391,57 @@ def test_body_over_64_kib_is_413_before_verification() -> None:
     assert rig.calls == []
 
 
+def test_over_cap_without_the_secret_is_401_and_not_read(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    resp = rig.post(body, authorization=None)
+    assert resp.status_code == 401
+    assert rig.verifier.calls == []
+    assert rig.calls == []
+    assert "unauthorized" in caplog.text
+    assert "too_large" not in caplog.text
+
+
+def test_over_cap_with_a_wrong_secret_is_401() -> None:
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    resp = rig.post(body, authorization="wrong")
+    assert resp.status_code == 401
+    assert rig.verifier.calls == []
+    assert rig.calls == []
+
+
+def test_too_large_logs_the_declared_bytes(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    assert rig.post(body).status_code == 413
+    assert f"too_large: {len(body)} declared" in caplog.text
+
+
+def test_too_large_logs_minus_one_when_chunked(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    resp = rig.client.post(
+        PATH,
+        content=iter([b"x" * (LIMIT + 1)]),
+        headers={"authorization": rig.secret},
+    )
+    assert resp.status_code == 413
+    assert "too_large: -1 declared" in caplog.text
+
+
+def test_published_logs_the_body_bytes(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = fixture("upsert_steps.json")
+    assert rig.post(body).status_code == 204
+    assert f"items, {len(body)} bytes" in caplog.text
+
+
 def test_body_of_exactly_64_kib_is_accepted() -> None:
     rig = Rig()
     base = fixture("upsert_steps.json").rstrip()
@@ -585,6 +636,10 @@ def test_logs_never_carry_the_body_secret_signature_record_or_user_id(
         verifier=FakeVerifier(error=SignatureVerificationUnavailable("x"))
     ).post(body, signature=signature)
     Rig(publisher=ScriptedPublisher(fail_on=1)).post(body, signature=signature)
+
+    over_cap = b'{"pad": "' + body_marker.encode() + b"x" * LIMIT + b'"}'
+    assert rig.post(over_cap, signature=signature).status_code == 413
+    assert rig.post(over_cap, authorization=None).status_code == 401
 
     app_records = [r for r in caplog.records if not r.name.startswith(("httpx", "httpcore"))]
     text = "\n".join(r.getMessage() for r in app_records)
