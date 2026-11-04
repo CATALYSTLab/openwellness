@@ -19,16 +19,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.config
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn.config
 from fastapi.dependencies.utils import get_flat_dependant
 from fastapi.routing import APIRoute
 
 from openwellness_api.deps.principal import ALLOW_UNAUTHENTICATED, require_write_principal
 from openwellness_api.event_handlers.ports import TaskPublishError
+from openwellness_api.google_health.notifications import install_notifications_logger
 from openwellness_api.google_health.signature import SignatureVerificationUnavailable
 
 from .google_health_harness import Harness, RecordingPublisher, make_settings
@@ -646,6 +650,51 @@ def test_logs_never_carry_the_body_secret_signature_record_or_user_id(
     assert "googleHealth/notifications" in text
     for sentinel in (user, record, body_marker, signature, rig.secret):
         assert sentinel not in text
+
+
+@pytest.fixture
+def uvicorn_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The real server's logging: uvicorn's config and a root logger with no handlers."""
+    names = (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "openwellness_api.google_health.notifications",
+    )
+    saved = [
+        (lg, list(lg.handlers), lg.level, lg.propagate)
+        for lg in map(logging.getLogger, names)
+    ]
+    logging.getLogger(names[-1]).handlers[:] = []
+    logging.getLogger(names[-1]).setLevel(logging.NOTSET)
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    # pytest's capture handlers sit on the root; production has none there.
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    yield
+    for lg, handlers, level, propagate in saved:
+        lg.handlers[:] = handlers
+        lg.setLevel(level)
+        lg.propagate = propagate
+
+
+def test_notification_lines_reach_stdout_once_under_uvicorn_logging(
+    capsys: pytest.CaptureFixture[str], uvicorn_logging: None
+) -> None:
+    install_notifications_logger()
+    install_notifications_logger()
+
+    rig = Rig()
+    body = fixture("upsert_steps.json")
+    assert rig.post(body).status_code == 204
+    assert rig.post(body, authorization="wrong").status_code == 401
+
+    out, err = capsys.readouterr()
+    lines = out.splitlines()
+    published = [line for line in lines if "googleHealth/notifications published:" in line]
+    assert len(published) == 1
+    assert f"items, {len(body)} bytes" in published[0]
+    assert lines.count("googleHealth/notifications unauthorized") == 1
+    assert "googleHealth/notifications" not in err
 
 
 @pytest.mark.parametrize("data_type", ["heart_rate", "total_calories_burned", "heart-rate", "Steps"])

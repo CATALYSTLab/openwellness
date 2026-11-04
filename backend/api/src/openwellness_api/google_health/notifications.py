@@ -58,6 +58,7 @@ from starlette.responses import Response
 from ..deps.principal import ALLOW_UNAUTHENTICATED
 from ..event_handlers.celery_producer import SCHEDULER_NEW_QUEUE
 from ..event_handlers.ports import TaskPublisher
+from .bridge import install_stdout_handler
 from .oauth import get_google_health_deps
 from .signature import SignatureVerificationUnavailable
 
@@ -358,6 +359,15 @@ async def receive_notification(request: Request) -> Response:
         len(raw),
     )
     return Response(status_code=204)
+
+
+def install_notifications_logger() -> None:
+    """Send this module's lines to stdout, including the INFO ``published`` line.
+
+    Propagation stays on: the root has no handlers under uvicorn, so nothing
+    is written twice, and a handler here stops the last-resort stderr handler.
+    """
+    install_stdout_handler(logger)
 
 
 def build_notifications_router() -> APIRouter:

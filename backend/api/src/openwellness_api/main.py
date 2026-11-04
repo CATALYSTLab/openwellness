@@ -34,6 +34,7 @@ from .google_health import (
     build_google_health_router,
 )
 from .google_health.bridge import install_google_health_audit_logger
+from .google_health.notifications import install_notifications_logger
 from .resources import RESOURCE_MODULES
 from .v1 import build_v1_router
 
@@ -115,6 +116,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Phase 16 D-10: the internal links audit line is INFO on its own
     # logger, which needs its own stdout handler to reach Loki.
     install_google_health_audit_logger()
+    # The webhook's `published` line is INFO too, and carries the body bytes
+    # that show the margin under the 64 KiB cap.
+    install_notifications_logger()
 
     # --- Auth feature wiring (settings + boot guard) -------------------- #
     auth_container = AuthContainer()
