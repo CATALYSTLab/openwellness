@@ -653,8 +653,8 @@ def test_logs_never_carry_the_body_secret_signature_record_or_user_id(
 
 
 @pytest.fixture
-def uvicorn_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """The real server's logging: uvicorn's config and a root logger with no handlers."""
+def uvicorn_logging() -> Iterator[None]:
+    """The real server's logging: uvicorn's config, restored after the test."""
     names = (
         "uvicorn",
         "uvicorn.error",
@@ -668,8 +668,6 @@ def uvicorn_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     logging.getLogger(names[-1]).handlers[:] = []
     logging.getLogger(names[-1]).setLevel(logging.NOTSET)
     logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
-    # pytest's capture handlers sit on the root; production has none there.
-    monkeypatch.setattr(logging.getLogger(), "handlers", [])
     yield
     for lg, handlers, level, propagate in saved:
         lg.handlers[:] = handlers
@@ -677,11 +675,30 @@ def uvicorn_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         lg.propagate = propagate
 
 
+def give_root_a_handler_like_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A module-level ``logging.warning`` on an empty root runs ``basicConfig()``.
+
+    Call from the test body: pytest re-adds its capture handlers to the root at
+    each test phase, and ``basicConfig()`` does nothing while they are there.
+    ``monkeypatch`` puts the root's own handler list back on teardown.
+    """
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    logging.warning("a module-level logging call")
+
+
+@pytest.mark.parametrize("root_handler_first", [True, False], ids=["before_install", "after_install"])
 def test_notification_lines_reach_stdout_once_under_uvicorn_logging(
-    capsys: pytest.CaptureFixture[str], uvicorn_logging: None
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    uvicorn_logging: None,
+    root_handler_first: bool,
 ) -> None:
+    if root_handler_first:
+        give_root_a_handler_like_production(monkeypatch)
     install_notifications_logger()
     install_notifications_logger()
+    if not root_handler_first:
+        give_root_a_handler_like_production(monkeypatch)
 
     rig = Rig()
     body = fixture("upsert_steps.json")
@@ -689,12 +706,17 @@ def test_notification_lines_reach_stdout_once_under_uvicorn_logging(
     assert rig.post(body, authorization="wrong").status_code == 401
 
     out, err = capsys.readouterr()
-    lines = out.splitlines()
-    published = [line for line in lines if "googleHealth/notifications published:" in line]
+    assert "WARNING:root:a module-level logging call" in err  # the root really has a handler
+    both = (out + err).splitlines()
+    published = [line for line in both if "googleHealth/notifications published:" in line]
+    unauthorized = [line for line in both if "googleHealth/notifications unauthorized" in line]
     assert len(published) == 1
     assert f"items, {len(body)} bytes" in published[0]
-    assert lines.count("googleHealth/notifications unauthorized") == 1
-    assert "googleHealth/notifications" not in err
+    assert unauthorized == ["googleHealth/notifications unauthorized"]
+    assert "INFO:openwellness_api" not in out + err
+    assert "WARNING:openwellness_api" not in out + err
+    assert published[0] in out.splitlines()
+    assert unauthorized[0] in out.splitlines()
 
 
 @pytest.mark.parametrize("data_type", ["heart_rate", "total_calories_burned", "heart-rate", "Steps"])

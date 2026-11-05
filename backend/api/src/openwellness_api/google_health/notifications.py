@@ -364,10 +364,12 @@ async def receive_notification(request: Request) -> Response:
 def install_notifications_logger() -> None:
     """Send this module's lines to stdout, including the INFO ``published`` line.
 
-    Propagation stays on: the root has no handlers under uvicorn, so nothing
-    is written twice, and a handler here stops the last-resort stderr handler.
+    ``propagate=False``: a module-level ``logging.warning()`` anywhere in the
+    process gives the root a handler at any time, and a line that propagated to
+    it would be written twice.
     """
     install_stdout_handler(logger)
+    logger.propagate = False
 
 
 def build_notifications_router() -> APIRouter:
