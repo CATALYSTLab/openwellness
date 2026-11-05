@@ -51,7 +51,7 @@ AUDIT_LOGGER_NAME: Final = "openwellness_api.audit.google_health"
 _HEX24: Final = re.compile(r"[0-9a-f]{24}")
 _REQUIRED_CLAIMS: Final = ["exp", "iat", "iss", "aud", "sub", "jti"]
 _GOOGLE_HEALTH_SECRETS: Final = ("link_secret", "state_secret", "webhook_secret", "client_secret")
-_AUDIT_HANDLER_MARK: Final = "_openwellness_google_health_audit"
+_STDOUT_HANDLER_MARK: Final = "_openwellness_google_health_stdout"
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger(AUDIT_LOGGER_NAME)
@@ -211,20 +211,26 @@ def require_bridge_credential(request: Request) -> str | None:
     return token
 
 
-def install_google_health_audit_logger() -> None:
-    """Give the audit logger its own stdout handler (idempotent).
+def install_stdout_handler(target: logging.Logger) -> None:
+    """Give ``target`` its own stdout handler at INFO (idempotent).
 
     uvicorn configures only its own loggers, and the root logger stays at
     WARNING, so an ``openwellness_api.*`` INFO line never reaches stdout.
-    The audit line needs its own handler to reach Promtail and Loki (D-10).
-    ``propagate=False`` keeps it from being written twice.
     """
-    if not any(getattr(h, _AUDIT_HANDLER_MARK, False) for h in audit_logger.handlers):
+    if not any(getattr(h, _STDOUT_HANDLER_MARK, False) for h in target.handlers):
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter("%(message)s"))
-        setattr(handler, _AUDIT_HANDLER_MARK, True)
-        audit_logger.addHandler(handler)
-    audit_logger.setLevel(logging.INFO)
+        setattr(handler, _STDOUT_HANDLER_MARK, True)
+        target.addHandler(handler)
+    target.setLevel(logging.INFO)
+
+
+def install_google_health_audit_logger() -> None:
+    """Send the audit line to stdout, to reach Promtail and Loki (D-10).
+
+    ``propagate=False`` keeps it from being written twice.
+    """
+    install_stdout_handler(audit_logger)
     audit_logger.propagate = False
 
 

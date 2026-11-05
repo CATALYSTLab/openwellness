@@ -19,16 +19,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.config
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn.config
 from fastapi.dependencies.utils import get_flat_dependant
 from fastapi.routing import APIRoute
 
 from openwellness_api.deps.principal import ALLOW_UNAUTHENTICATED, require_write_principal
 from openwellness_api.event_handlers.ports import TaskPublishError
+from openwellness_api.google_health.notifications import install_notifications_logger
 from openwellness_api.google_health.signature import SignatureVerificationUnavailable
 
 from .google_health_harness import Harness, RecordingPublisher, make_settings
@@ -391,6 +395,57 @@ def test_body_over_64_kib_is_413_before_verification() -> None:
     assert rig.calls == []
 
 
+def test_over_cap_without_the_secret_is_401_and_not_read(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    resp = rig.post(body, authorization=None)
+    assert resp.status_code == 401
+    assert rig.verifier.calls == []
+    assert rig.calls == []
+    assert "unauthorized" in caplog.text
+    assert "too_large" not in caplog.text
+
+
+def test_over_cap_with_a_wrong_secret_is_401() -> None:
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    resp = rig.post(body, authorization="wrong")
+    assert resp.status_code == 401
+    assert rig.verifier.calls == []
+    assert rig.calls == []
+
+
+def test_too_large_logs_the_declared_bytes(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = b'{"data": {"pad": "' + b"x" * LIMIT + b'"}}'
+    assert rig.post(body).status_code == 413
+    assert f"too_large: {len(body)} declared" in caplog.text
+
+
+def test_too_large_logs_minus_one_when_chunked(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    resp = rig.client.post(
+        PATH,
+        content=iter([b"x" * (LIMIT + 1)]),
+        headers={"authorization": rig.secret},
+    )
+    assert resp.status_code == 413
+    assert "too_large: -1 declared" in caplog.text
+
+
+def test_published_logs_the_body_bytes(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    rig = Rig()
+    body = fixture("upsert_steps.json")
+    assert rig.post(body).status_code == 204
+    assert f"items, {len(body)} bytes" in caplog.text
+
+
 def test_body_of_exactly_64_kib_is_accepted() -> None:
     rig = Rig()
     base = fixture("upsert_steps.json").rstrip()
@@ -586,11 +641,82 @@ def test_logs_never_carry_the_body_secret_signature_record_or_user_id(
     ).post(body, signature=signature)
     Rig(publisher=ScriptedPublisher(fail_on=1)).post(body, signature=signature)
 
+    over_cap = b'{"pad": "' + body_marker.encode() + b"x" * LIMIT + b'"}'
+    assert rig.post(over_cap, signature=signature).status_code == 413
+    assert rig.post(over_cap, authorization=None).status_code == 401
+
     app_records = [r for r in caplog.records if not r.name.startswith(("httpx", "httpcore"))]
     text = "\n".join(r.getMessage() for r in app_records)
     assert "googleHealth/notifications" in text
     for sentinel in (user, record, body_marker, signature, rig.secret):
         assert sentinel not in text
+
+
+@pytest.fixture
+def uvicorn_logging() -> Iterator[None]:
+    """The real server's logging: uvicorn's config, restored after the test."""
+    names = (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "openwellness_api.google_health.notifications",
+    )
+    saved = [
+        (lg, list(lg.handlers), lg.level, lg.propagate)
+        for lg in map(logging.getLogger, names)
+    ]
+    logging.getLogger(names[-1]).handlers[:] = []
+    logging.getLogger(names[-1]).setLevel(logging.NOTSET)
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    yield
+    for lg, handlers, level, propagate in saved:
+        lg.handlers[:] = handlers
+        lg.setLevel(level)
+        lg.propagate = propagate
+
+
+def give_root_a_handler_like_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A module-level ``logging.warning`` on an empty root runs ``basicConfig()``.
+
+    Call from the test body: pytest re-adds its capture handlers to the root at
+    each test phase, and ``basicConfig()`` does nothing while they are there.
+    ``monkeypatch`` puts the root's own handler list back on teardown.
+    """
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    logging.warning("a module-level logging call")
+
+
+@pytest.mark.parametrize("root_handler_first", [True, False], ids=["before_install", "after_install"])
+def test_notification_lines_reach_stdout_once_under_uvicorn_logging(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    uvicorn_logging: None,
+    root_handler_first: bool,
+) -> None:
+    if root_handler_first:
+        give_root_a_handler_like_production(monkeypatch)
+    install_notifications_logger()
+    install_notifications_logger()
+    if not root_handler_first:
+        give_root_a_handler_like_production(monkeypatch)
+
+    rig = Rig()
+    body = fixture("upsert_steps.json")
+    assert rig.post(body).status_code == 204
+    assert rig.post(body, authorization="wrong").status_code == 401
+
+    out, err = capsys.readouterr()
+    assert "WARNING:root:a module-level logging call" in err  # the root really has a handler
+    both = (out + err).splitlines()
+    published = [line for line in both if "googleHealth/notifications published:" in line]
+    unauthorized = [line for line in both if "googleHealth/notifications unauthorized" in line]
+    assert len(published) == 1
+    assert f"items, {len(body)} bytes" in published[0]
+    assert unauthorized == ["googleHealth/notifications unauthorized"]
+    assert "INFO:openwellness_api" not in out + err
+    assert "WARNING:openwellness_api" not in out + err
+    assert published[0] in out.splitlines()
+    assert unauthorized[0] in out.splitlines()
 
 
 @pytest.mark.parametrize("data_type", ["heart_rate", "total_calories_burned", "heart-rate", "Steps"])

@@ -17,8 +17,8 @@ Google's contract (https://developers.google.com/health/webhooks, fetched
 The route follows Phase 10's enqueue-and-return rule (HOOK-01, D-02): it reads
 nothing from Mongo, writes nothing and fetches nothing itself. Order:
 
-1. bounded raw read (64 KiB, else 413);
-2. constant-time ``Authorization`` check (else 401);
+1. constant-time ``Authorization`` check (else 401);
+2. bounded raw read (64 KiB, else 413), so a 413 proves the sender held the secret;
 3. the verification body (200);
 4. the signature over the exact raw bytes, in the threadpool (401 invalid,
    503 when the key is unavailable so Google retries);
@@ -58,6 +58,7 @@ from starlette.responses import Response
 from ..deps.principal import ALLOW_UNAUTHENTICATED
 from ..event_handlers.celery_producer import SCHEDULER_NEW_QUEUE
 from ..event_handlers.ports import TaskPublisher
+from .bridge import install_stdout_handler
 from .oauth import get_google_health_deps
 from .signature import SignatureVerificationUnavailable
 
@@ -302,14 +303,15 @@ async def receive_notification(request: Request) -> Response:
         logger.warning("%s unavailable: disabled", _LOG)
         return Response(status_code=503)
 
-    raw = await _read_bounded(request)
-    if raw is None:
-        logger.warning("%s too_large", _LOG)
-        return Response(status_code=413)
-
     if not _authorized(request.headers.get("authorization"), deps.settings.webhook_secret):
         logger.warning("%s unauthorized", _LOG)
         return Response(status_code=401)
+
+    raw = await _read_bounded(request)
+    if raw is None:
+        declared = _declared_length(request.headers.get("content-length"))
+        logger.warning("%s too_large: %d declared", _LOG, -1 if declared is None else declared)
+        return Response(status_code=413)
 
     parsed = _load_json(raw)
     if _is_verification(parsed):
@@ -350,9 +352,24 @@ async def receive_notification(request: Request) -> Response:
         logger.error("%s publish failed: %s", _LOG, type(exc).__name__)
         return Response(status_code=503)
     logger.info(
-        "%s published: %d groups from %d items", _LOG, len(groups), len(items) - dropped
+        "%s published: %d groups from %d items, %d bytes",
+        _LOG,
+        len(groups),
+        len(items) - dropped,
+        len(raw),
     )
     return Response(status_code=204)
+
+
+def install_notifications_logger() -> None:
+    """Send this module's lines to stdout, including the INFO ``published`` line.
+
+    ``propagate=False``: a module-level ``logging.warning()`` anywhere in the
+    process gives the root a handler at any time, and a line that propagated to
+    it would be written twice.
+    """
+    install_stdout_handler(logger)
+    logger.propagate = False
 
 
 def build_notifications_router() -> APIRouter:
