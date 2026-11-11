@@ -21,9 +21,8 @@ DEFAULT_SCOPES: Final[tuple[str, ...]] = (
     "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
     "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
-    "https://www.googleapis.com/auth/googlehealth.settings.readonly",
 )
-"""The four locked read-only scopes (contract "Scopes", D-18)."""
+"""The three locked read-only scopes (contract "Scopes", 10.1 D-18 as amended by opserver 17.2 D-01)."""
 
 AUTHORIZE_ENDPOINT: Final = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT: Final = "https://oauth2.googleapis.com/token"
