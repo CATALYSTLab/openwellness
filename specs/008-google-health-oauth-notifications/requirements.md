@@ -25,10 +25,10 @@ As a participant, I want to open my link, consent on Google's page and see a con
 
 **Acceptance criteria**
 
-- WHEN a valid, unclaimed link is opened THE system SHALL set a browser-binding cookie, mint a single-use OAuth state bound to that cookie, and redirect to Google consent with `access_type=offline`, `prompt=consent`, the four read-only Google Health scopes and the registered redirect URI.
+- WHEN a valid, unclaimed link is opened THE system SHALL set a browser-binding cookie, mint a single-use OAuth state bound to that cookie, and redirect to Google consent with `access_type=offline`, `prompt=consent`, the three read-only Google Health scopes and the registered redirect URI.
 - WHEN Google redirects back with a code THE system SHALL exchange it, look up the Google identity, and store one `fitbits` record with `provider: "googleHealth"` and `migrationStatus: "pending"`, in the shape of opserver's `docs/google-health.md` contract.
 - WHEN that record is stored THE system SHALL mark every other active record of the participant superseded by it, keep a first `migratedAt` across re-consents, and publish `googleHealth.completeMigration [participantId, googleRecordId, supersededRecordIds]` onto queue `scheduler_new`.
-- WHEN the grant lacks any of the four scopes or a refresh token THE system SHALL store nothing and let the participant use the same link again.
+- WHEN the grant lacks any of the three scopes or a refresh token THE system SHALL store nothing and let the participant use the same link again.
 - WHEN the state is forged, expired, replayed, from another browser, or signed for another audience THE system SHALL refuse without calling Google and without a write.
 - WHEN the Google account is already connected to another participant THE system SHALL refuse without a write.
 - WHEN two finishAuth requests race for the same link, participant or Google account THE system SHALL let at most one of them store a record.

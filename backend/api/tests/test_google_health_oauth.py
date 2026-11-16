@@ -43,6 +43,8 @@ from .google_health_harness import (
 FROZEN = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
 FROZEN_TS = int(FROZEN.timestamp())
 SCOPES = FULL_SCOPE.split(" ")
+# Dropped by opserver 17.2 D-01; grants made before the change still carry it.
+OLD_SETTINGS_SCOPE = "https://www.googleapis.com/auth/googlehealth.settings.readonly"
 
 
 @pytest.fixture
@@ -102,7 +104,7 @@ def test_authorize_redirects_to_google_with_a_browser_bound_state(h: Harness) ->
     assert query["client_id"] == [h.settings.client_id]
     assert query["redirect_uri"] == [f"{PUBLIC_BASE_URL}/api/googleHealth/finishAuth"]
     assert query["scope"][0].split(" ") == SCOPES
-    assert len(SCOPES) == 4
+    assert len(SCOPES) == 3
 
     assert claims["aud"] == "googleHealth:state"
     assert claims["sub"] == pid
@@ -177,6 +179,28 @@ def test_finish_auth_stores_the_google_record_supersedes_legacy_and_publishes(
         ("googleHealth.completeMigration", [pid, google_id, [legacy_id]], "scheduler_new")
     ]
     assert h.google.exchanges == ["code-1"]
+
+
+def test_finish_auth_accepts_a_grant_that_still_holds_the_old_fourth_scope(
+    h: Harness,
+) -> None:
+    pid = h.seed_participant()
+    h.google.add(
+        "code-1",
+        access="g-access-1",
+        refresh="g-refresh-1",
+        scope=f"{FULL_SCOPE} {OLD_SETTINGS_SCOPE}",
+        health_user_id="HUSER1",
+        legacy_user_id=None,
+    )
+
+    with time_machine.travel(FROZEN, tick=False):
+        resp = h.run_flow(pid, "code-1")
+
+    assert resp.status_code == 200, resp.text
+    (record,) = h.google_records()
+    assert record["scope"] == f"{FULL_SCOPE} {OLD_SETTINGS_SCOPE}"
+    assert h.google.revokes == []
 
 
 def test_reconsent_carries_the_first_migration_date_forward(h: Harness) -> None:
@@ -412,7 +436,7 @@ def _link_claims(h: Harness) -> list[str]:
     "grant",
     [
         {"refresh": None, "scope": FULL_SCOPE},
-        {"refresh": "r1", "scope": " ".join(SCOPES[:3])},
+        {"refresh": "r1", "scope": " ".join(SCOPES[:2])},
         {"refresh": "r1", "scope": ""},
     ],
 )
@@ -446,7 +470,7 @@ def test_rejected_reconsent_never_revokes_the_active_grant(
         "c1",
         access="a1",
         refresh="r1",
-        scope=" ".join(SCOPES[:3]),
+        scope=" ".join(SCOPES[:2]),
         health_user_id="H1",
         legacy_user_id=None,
     )

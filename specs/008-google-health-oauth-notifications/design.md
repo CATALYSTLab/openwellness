@@ -72,7 +72,9 @@ Both carry `iss=openwellness-api`, and verification requires `exp`, `iat`, `jti`
 
 `ow_api` runs two uvicorn workers, so none of this state lives in process memory. The link claim and the locks carry a random owner token and are renewed, committed and released by compare-and-set or compare-and-delete under `WATCH`, so a request never touches a key another request re-took after expiry. A pending claim lives one lock lease, so a claim whose release failed before the commit frees the link within 60 s.
 
-The lifetimes, scopes and Google endpoints are constants, not settings: no `GOOGLE_HEALTH_*` value can change the link (72 h), state (15 min) or lock (60 s) lifetime, the four scopes, or the OAuth and identity URLs. The OAuth client and the keyset fetch never follow a redirect.
+The lifetimes, scopes and Google endpoints are constants, not settings: no `GOOGLE_HEALTH_*` value can change the link (72 h), state (15 min) or lock (60 s) lifetime, the three scopes, or the OAuth and identity URLs. The OAuth client and the keyset fetch never follow a redirect.
+
+> Amended 2026-11-11 (opserver 17.2 D-01): the Google Health settings scope (`googlehealth.settings.readonly`) was dropped, so `ow_api` asks for three scopes. A grant that still holds the dropped scope passes, because the check tests for a superset of the three.
 
 ## finishAuth order
 
@@ -83,7 +85,7 @@ finishAuth is the one route that does credential work inline (the consuming proj
 3. Read the participant (active, not held).
 4. Claim the link (`gh:link:claim`, pending). An expired link cannot be claimed. A second state minted from the same link can never exchange a code.
 5. Exchange the code.
-6. Validate the grant: all four scopes and a refresh token, else refuse and release the claim.
+6. Validate the grant: all three scopes and a refresh token, else refuse and release the claim.
 7. Look up the identity (`healthUserId`, `legacyUserId`).
 8. Take the participant lock, then the account lock; busy answers 409.
 9. Recheck ownership under the account lock: another participant's GOOGLE_ACTIVE record on the same `healthUserId` refuses (I2).
