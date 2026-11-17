@@ -2,7 +2,9 @@
 
 Only the code exchange, the identity lookup and the revoke of a rejected
 grant run inside the request. Health data is never fetched here (D-06); the
-scheduler does that from ``googleHealth.completeMigration`` on.
+scheduler does that from ``googleHealth.completeMigration`` on. ``revoke``
+also serves the coach revoke route (opserver Phase 17.3), which needs to tell
+a grant that is already dead from a live failure (D-05).
 
 Every failure raises :class:`GoogleOAuthError` carrying a fixed kind string,
 never Google's response body, a token or a code.
@@ -18,6 +20,8 @@ import requests
 from .settings import GoogleHealthSettings
 
 _TIMEOUT_SECONDS: Final = 10
+# Revoke-endpoint codes proving the grant is already dead (scheduler DEAD_TOKEN_CODES).
+_DEAD_TOKEN_CODES: Final = frozenset({"invalid_token", "invalid_grant"})
 
 
 class GoogleOAuthError(Exception):
@@ -114,10 +118,15 @@ class RequestsGoogleOAuthClient:
                 timeout=_TIMEOUT_SECONDS,
                 allow_redirects=False,
             )
+        except requests.Timeout as exc:
+            raise GoogleOAuthError("revoke_timeout") from exc
         except Exception as exc:
             raise GoogleOAuthError("revoke_failed") from exc
-        if not _ok(response.status_code):
-            raise GoogleOAuthError("revoke_failed")
+        if _ok(response.status_code):
+            return
+        if response.status_code == 400 and _oauth_error(response) in _DEAD_TOKEN_CODES:
+            raise GoogleOAuthError("revoke_token_invalid")
+        raise GoogleOAuthError("revoke_failed")
 
     def _json(self, kind: str, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -142,3 +151,13 @@ class RequestsGoogleOAuthClient:
 def _ok(status: int) -> bool:
     """2xx only: a redirect is a failure, not something to follow."""
     return 200 <= status < 300
+
+
+def _oauth_error(response: Any) -> str | None:
+    """Google's RFC 6749 ``error`` code only; the free-text description can echo request values."""
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, str) else None
