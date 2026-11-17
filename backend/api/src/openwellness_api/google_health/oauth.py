@@ -12,8 +12,9 @@
 
 Pages are fixed HTML strings that echo no request data. Log lines have the
 fixed shape ``googleHealth/<route> <outcome>[: <ExceptionClassName>]`` and
-never carry a token, code, state, link, cookie, participant id or Google
-user id (HIPAA 6-year log retention).
+never carry a token, code, state, link, cookie or Google user id (HIPAA
+6-year log retention). Participant record ids appear only on the audit line
+for an account connected elsewhere.
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ from .store import GoogleHealthStore
 from .tokens import GoogleHealthTokenError, GoogleHealthTokens, LinkClaim, TokenStoreError
 
 logger = logging.getLogger(__name__)
+# bridge's audit_logger by name (same object, same stdout handler); not imported: bridge imports us.
+_AUDIT_LOGGER: Final = logging.getLogger("openwellness_api.audit.google_health")
 
 COOKIE_NAME: Final = "gh_oauth"
 COOKIE_PATH: Final = "/api/googleHealth"
@@ -376,7 +379,11 @@ def finish_auth(
             # participant's active record shares it.
             owner = deps.store.active_google_owner_of(identity.health_user_id, other_than=pid)
             if owner is not None:
-                logger.warning("googleHealth/finishAuth refused: account connected elsewhere")
+                _AUDIT_LOGGER.warning(
+                    "googleHealth/finishAuth outcome=connected_elsewhere participantId=%s owner=%s",
+                    pid,
+                    owner,
+                )
                 _release_link(deps, link_claim)
                 return _error()
             legacy_owners = deps.store.legacy_owner_ids(pid)
