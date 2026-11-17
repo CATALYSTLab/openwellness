@@ -51,8 +51,8 @@ HAPI_HEADERS: Final[dict[str, str]] = {
 # ``error``. It is neither Node's http.STATUS_CODES nor Python's HTTPStatus:
 # frame's live 413 reads "Request Entity Too Large", where Node and Python
 # both say "Payload Too Large"/"Content Too Large". Covers every status the
-# event handlers, the participants route and the Google Health internal links
-# route (opserver Phase 16) emit.
+# event handlers, the participants route, the Google Health internal links
+# route (opserver Phase 16) and the internal revocations route (Phase 17.3) emit.
 _REASON: Final[dict[int, str]] = {
     400: "Bad Request",
     401: "Unauthorized",
@@ -62,8 +62,11 @@ _REASON: Final[dict[int, str]] = {
     412: "Precondition Failed",
     413: "Request Entity Too Large",
     415: "Unsupported Media Type",
+    423: "Locked",
     500: "Internal Server Error",
+    502: "Bad Gateway",
     503: "Service Unavailable",
+    504: "Gateway Timeout",
 }
 
 INVALID_JSON_MESSAGE: Final = "Invalid request payload JSON format"

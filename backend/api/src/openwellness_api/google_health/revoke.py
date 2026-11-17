@@ -36,6 +36,7 @@ from .bridge import (
     audit_logger,
     require_bridge_credential,
 )
+from .google_client import GoogleOAuthError
 from .oauth import GoogleHealthDeps
 
 logger = logging.getLogger(__name__)
@@ -90,12 +91,28 @@ def _revoke_result(
     attempt.record_ids = tuple(record["id"] for record in records)
     if not records:
         return boom(409, "No Google Health account is linked for this participant.")
+    if not all(_nonempty(record["healthUserId"]) for record in records):
+        # A contract breach for the operator to repair; never revoke blind.
+        return boom(500, "An internal server error occurred")
     locks = deps.tokens.acquire_locks(participant_id, records[0]["healthUserId"])
     if locks is None:
         return boom(423, "Another change for this participant is in progress.")
     try:
         for record in records:
-            deps.google.revoke(record["refreshToken"] or record["accessToken"])
+            token = next(
+                (t for t in (record["refreshToken"], record["accessToken"]) if _nonempty(t)),
+                None,
+            )
+            if token is None:
+                continue
+            try:
+                deps.google.revoke(token)
+            except GoogleOAuthError as exc:
+                # Change nothing on a live failure (D-05, D-14); a dead grant counts as revoked.
+                if exc.kind == "revoke_timeout":
+                    return boom(504, "Google did not answer in time.")
+                if exc.kind != "revoke_token_invalid":
+                    return boom(502, "Google did not confirm the revocation.")
         with pymongo.timeout(deps.settings.store_write_budget_seconds):
             deps.store.end_revoked(
                 participant_id, list(attempt.record_ids), actor, int(deps.clock())
@@ -104,3 +121,7 @@ def _revoke_result(
         deps.tokens.release_locks(locks)
     # Lowercase key, so it replaces HAPI_HEADERS' no-cache rather than adding a second header.
     return Response(status_code=204, headers={**HAPI_HEADERS, "cache-control": "no-store"})
+
+
+def _nonempty(value: object) -> bool:
+    return isinstance(value, str) and value != ""
