@@ -10,12 +10,18 @@ them (D-01..D-03). Every attempt writes one audit line on
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import pytest
+import requests
 
 from openwellness_api.google_health import bridge
 from openwellness_api.google_health.bridge import INTERNAL_LINKS_PATH
+from openwellness_api.google_health.google_client import (
+    GoogleOAuthError,
+    RequestsGoogleOAuthClient,
+)
 
 from .google_health_harness import Harness, make_settings
 from .test_google_health_bridge import (  # noqa: F401  (fixtures register by import)
@@ -302,3 +308,123 @@ def test_a_revoked_participant_can_link_again(h: Harness) -> None:
     [old] = [r for r in h.google_records(participantId=pid) if str(r["_id"]) == old_id]
     assert isinstance(old["revokedAt"], int)
     assert old["supersededBy"] is None
+
+
+# --- 17.3-02 Task 1: the real Google client tells a dead grant from a live failure ---
+
+
+class _StubResponse:
+    def __init__(self, status_code: int, body: Any) -> None:
+        self.status_code = status_code
+        self._body = body
+
+    def json(self) -> Any:
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _StubSession:
+    """A ``requests.Session`` stand-in whose ``post`` answers or raises as set."""
+
+    def __init__(self, status_code: int = 200, body: Any = None, raises: Exception | None = None):
+        self.status_code = status_code
+        self.body = body
+        self.raises = raises
+        self.posts: list[tuple[str, dict[str, Any]]] = []
+
+    def post(self, url: str, **kwargs: Any) -> _StubResponse:
+        self.posts.append((url, kwargs))
+        if self.raises is not None:
+            raise self.raises
+        return _StubResponse(self.status_code, self.body)
+
+
+_DESCRIPTION = "the-description-echoes-old-google-refresh"
+
+
+def _client(session: _StubSession) -> RequestsGoogleOAuthClient:
+    return RequestsGoogleOAuthClient(make_settings(), session=session)  # type: ignore[arg-type]
+
+
+def test_the_real_client_returns_on_200() -> None:
+    session = _StubSession(200, {})
+    assert _client(session).revoke("old-google-refresh") is None
+    [(url, kwargs)] = session.posts
+    assert url == make_settings().revoke_endpoint
+    assert kwargs["data"] == {"token": "old-google-refresh"}
+
+
+@pytest.mark.parametrize(
+    ("session", "kind"),
+    [
+        (_StubSession(400, {"error": "invalid_token"}), "revoke_token_invalid"),
+        (_StubSession(400, {"error": "invalid_grant"}), "revoke_token_invalid"),
+        (
+            _StubSession(400, {"error": "invalid_request", "error_description": _DESCRIPTION}),
+            "revoke_failed",
+        ),
+        (_StubSession(400, ValueError("not json")), "revoke_failed"),
+        (_StubSession(400, ["invalid_token"]), "revoke_failed"),
+        (_StubSession(503, {"error": "invalid_token"}), "revoke_failed"),
+        (_StubSession(raises=requests.Timeout("old-google-refresh")), "revoke_timeout"),
+        (_StubSession(raises=requests.ConnectionError("old-google-refresh")), "revoke_failed"),
+    ],
+    ids=[
+        "invalid_token",
+        "invalid_grant",
+        "invalid_request",
+        "non_json",
+        "non_object",
+        "503",
+        "timeout",
+        "connection_error",
+    ],
+)
+def test_the_real_client_classifies_a_failed_revoke(session: _StubSession, kind: str) -> None:
+    with pytest.raises(GoogleOAuthError) as caught:
+        _client(session).revoke("old-google-refresh")
+    assert caught.value.kind == kind
+    assert str(caught.value) == kind
+    assert "old-google-refresh" not in str(caught.value)
+    assert _DESCRIPTION not in str(caught.value)
+
+
+def _with_real_client(h: Harness, session: _StubSession) -> None:
+    h.app.state.google_health_deps = dataclasses.replace(h.deps, google=_client(session))
+
+
+def test_a_dead_grant_at_google_ends_the_record_through_the_real_client(h: Harness) -> None:
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    session = _StubSession(400, {"error": "invalid_token"})
+    _with_real_client(h, session)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 204, resp.text
+    assert h.active_google(participantId=pid) == []
+    assert [url for url, _ in session.posts] == [make_settings().revoke_endpoint]
+
+
+@pytest.mark.parametrize(
+    ("session", "status"),
+    [
+        (_StubSession(400, {"error": "invalid_request"}), 502),
+        (_StubSession(raises=requests.Timeout()), 504),
+    ],
+    ids=["invalid_request", "timeout"],
+)
+def test_a_live_failure_through_the_real_client_changes_nothing(
+    h: Harness, session: _StubSession, status: int
+) -> None:
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    _with_real_client(h, session)
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == status
+    assert _fitbits(h) == before
+    assert [url for url, _ in session.posts] == [make_settings().revoke_endpoint]
