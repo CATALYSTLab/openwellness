@@ -63,8 +63,10 @@ D13_ALIASES: tuple[str, ...] = (
     "lastSyncAt",
     "devices",
     "devicesFetchedAt",
+    "revokedAt",
+    "revokedBy",
 )
-"""The thirteen persisted field names the contract adds to a ``fitbits`` record."""
+"""The fifteen persisted field names the contract adds to a ``fitbits`` record."""
 
 # Domain attribute name for each persisted name the selection rule reads.
 _ATTRIBUTE = {"provider": "provider", "supersededAt": "superseded_at"}
@@ -156,3 +158,5 @@ class Fitbit(BaseEntity):
     last_sync_at: Optional[int] = None
     devices: Optional[list] = None
     devices_fetched_at: Optional[int] = None
+    revoked_at: Optional[int] = None
+    revoked_by: Optional[str] = None
