@@ -742,3 +742,47 @@ def test_the_google_client_never_follows_a_redirect(h: Harness, call: str) -> No
     with pytest.raises(GoogleOAuthError):
         getattr(client, call)("x")
     assert [kwargs.get("allow_redirects") for kwargs in session.calls] == [False]
+
+
+# --- opserver 17.3-02 Task 4: the connected-elsewhere refusal names the owner ---
+
+from openwellness_api.google_health import bridge as _bridge  # noqa: E402
+from openwellness_api.google_health import oauth as _oauth  # noqa: E402
+
+from .test_google_health_bridge import _Collect, audit  # noqa: E402,F401
+
+
+def test_connected_elsewhere_logs_the_owner(h: Harness, audit: _Collect) -> None:
+    account, code = "H1-never-logged", "code-never-logged"
+    access, refresh = "access-never-logged", "refresh-never-logged"
+    owner = h.seed_participant()
+    h.seed_google(owner, health_user_id=account, migrated_at=FROZEN_TS - 86400)
+    before = h.google_records()
+    pid = h.seed_participant()
+    h.google.add(code, access=access, refresh=refresh, health_user_id=account, legacy_user_id=None)
+
+    resp = h.run_flow(pid, code)
+
+    assert resp.status_code == 400
+    assert h.google_records() == before
+    assert h.publisher.calls == []
+    assert _link_claims(h) == []
+    assert h.google.revokes == []
+    lines = [line for line in audit.lines() if "connected_elsewhere" in line]
+    assert lines == [
+        f"googleHealth/finishAuth outcome=connected_elsewhere participantId={pid} owner={owner}"
+    ]
+    for secret in (account, access, refresh, code):
+        assert secret not in lines[0]
+    # bridge imports oauth, so oauth names the audit logger instead of importing it.
+    assert _oauth._AUDIT_LOGGER is _bridge.audit_logger
+
+
+def test_connected_flow_logs_no_connected_elsewhere(h: Harness, audit: _Collect) -> None:
+    pid = h.seed_participant()
+    h.google.add("c1", access="a1", refresh="r1", health_user_id="H1", legacy_user_id=None)
+
+    resp = h.run_flow(pid, "c1")
+
+    assert resp.status_code == 200
+    assert [line for line in audit.lines() if "connected_elsewhere" in line] == []
