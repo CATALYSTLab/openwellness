@@ -22,6 +22,7 @@ from openwellness_api.google_health.google_client import (
     GoogleOAuthError,
     RequestsGoogleOAuthClient,
 )
+from openwellness_api.google_health.tokens import PID_LOCK_KEY, account_lock_key
 
 from .google_health_harness import Harness, make_settings
 from .test_google_health_bridge import (  # noqa: F401  (fixtures register by import)
@@ -428,3 +429,180 @@ def test_a_live_failure_through_the_real_client_changes_nothing(
     assert resp.status_code == status
     assert _fitbits(h) == before
     assert [url for url, _ in session.posts] == [make_settings().revoke_endpoint]
+
+
+# --- 17.3-02 Task 2: every GOOGLE_ACTIVE record under every lock (D-14) ----------------
+
+
+_BUSY = {
+    "statusCode": 423,
+    "error": "Locked",
+    "message": "Another change for this participant is in progress.",
+}
+
+
+def _seed_two(h: Harness, pid: str, second_hu: str = "hu-1") -> tuple[str, str]:
+    first = h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    second = h.seed_google(
+        pid,
+        health_user_id=second_hu,
+        migrated_at=1_790_000_100,
+        refresh_token="second-refresh",
+        access_token="second-access",
+    )
+    return first, second
+
+
+def test_every_active_record_is_revoked_and_ended(h: Harness, audit: _Collect) -> None:
+    pid = h.seed_participant()
+    first, second = _seed_two(h, pid)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 204, resp.text
+    assert h.google.revokes == ["old-google-refresh", "second-refresh"]
+    ended = h.google_records(participantId=pid)
+    assert len(ended) == 2
+    assert len({record["revokedAt"] for record in ended}) == 1
+    assert all(record["revokedBy"] == ACTOR for record in ended)
+    assert audit.lines() == [
+        f"googleHealth/internalRevocations outcome=ok actor={ACTOR} participantId={pid} "
+        f"recordIds={first},{second}"
+    ]
+
+
+def test_every_lock_is_held_during_google_and_released_after(h: Harness) -> None:
+    pid = h.seed_participant()
+    _seed_two(h, pid, second_hu="hu-2")
+    expected = sorted([PID_LOCK_KEY.format(participant_id=pid), account_lock_key("hu-1"),
+                       account_lock_key("hu-2")])
+    seen: list[list[str]] = []
+    revoke = h.google.revoke
+
+    def revoke_seeing_locks(token: str) -> None:
+        seen.append(sorted(h.redis.keys("gh:lock:*")))
+        revoke(token)
+
+    h.google.revoke = revoke_seeing_locks  # type: ignore[method-assign]
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 204, resp.text
+    assert seen == [expected, expected]
+    assert h.redis.keys("gh:lock:*") == []
+
+
+def test_one_live_failure_changes_every_record_back_to_nothing(h: Harness) -> None:
+    pid = h.seed_participant()
+    _seed_two(h, pid, second_hu="hu-2")
+    h.google.revoke_errors["second-refresh"] = "revoke_failed"
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 502
+    # The first grant was revoked at Google, yet nothing is written (D-14).
+    assert h.google.revokes == ["old-google-refresh", "second-refresh"]
+    assert _fitbits(h) == before
+    assert h.redis.keys("gh:lock:*") == []
+
+
+def test_one_dead_and_one_ok_ends_both(h: Harness) -> None:
+    pid = h.seed_participant()
+    _seed_two(h, pid, second_hu="hu-2")
+    h.google.revoke_errors["old-google-refresh"] = "revoke_token_invalid"
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 204, resp.text
+    assert h.active_google(participantId=pid) == []
+
+
+@pytest.mark.parametrize("held", ["pid", "hu-1", "hu-2"])
+def test_a_busy_lock_is_423_and_changes_nothing(h: Harness, audit: _Collect, held: str) -> None:
+    pid = h.seed_participant()
+    first, second = _seed_two(h, pid, second_hu="hu-2")
+    key = PID_LOCK_KEY.format(participant_id=pid) if held == "pid" else account_lock_key(held)
+    h.redis.set(key, "another-owner", px=60000)
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 423
+    assert resp.json() == _BUSY
+    assert h.google.revokes == []
+    assert _fitbits(h) == before
+    assert h.redis.get(key) == "another-owner"
+    assert h.redis.keys("gh:lock:*") == [key]
+    assert audit.lines() == [
+        f"googleHealth/internalRevocations outcome=423 actor={ACTOR} participantId={pid} "
+        f"recordIds={first},{second}"
+    ]
+
+
+def test_a_shared_account_is_500_and_never_revoked(h: Harness, audit: _Collect) -> None:
+    pid = h.seed_participant()
+    record_id = h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    other = h.seed_participant()
+    h.seed_google(
+        other, health_user_id="hu-1", migrated_at=1_790_000_000, refresh_token="other-refresh"
+    )
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 500
+    assert resp.json()["message"] == "An internal server error occurred"
+    assert h.google.revokes == []
+    assert _fitbits(h) == before
+    assert h.redis.keys("gh:lock:*") == []
+    assert audit.lines() == [
+        f"googleHealth/internalRevocations outcome=500 actor={ACTOR} participantId={pid} "
+        f"recordIds={record_id} owner={other}"
+    ]
+
+
+def _change_under_the_locks(h: Harness, change: Any) -> None:
+    acquire = h.deps.tokens.acquire_locks
+
+    def acquire_then_change(*args: Any) -> Any:
+        locks = acquire(*args)
+        change()
+        return locks
+
+    h.deps.tokens.acquire_locks = acquire_then_change  # type: ignore[method-assign]
+
+
+def test_records_gone_under_the_locks_is_409(h: Harness) -> None:
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    _change_under_the_locks(
+        h,
+        lambda: h.db["fitbits"].update_many(
+            {"participantId": pid}, {"$set": {"supersededAt": 1, "supersededBy": None}}
+        ),
+    )
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 409
+    assert h.google.revokes == []
+    assert h.redis.keys("gh:lock:*") == []
+
+
+def test_a_record_set_changed_under_the_locks_is_423(h: Harness) -> None:
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    _change_under_the_locks(
+        h, lambda: h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_200)
+    )
+    before_change = h.db["fitbits"].count_documents({})
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 423
+    assert resp.json() == _BUSY
+    assert h.google.revokes == []
+    assert len(h.active_google(participantId=pid)) == 2
+    assert h.db["fitbits"].count_documents({}) == before_change + 1
+    assert h.redis.keys("gh:lock:*") == []
