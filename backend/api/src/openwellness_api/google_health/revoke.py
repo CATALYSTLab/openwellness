@@ -14,13 +14,17 @@ those of the internal links route (:func:`.bridge._bridge_request`).
   ``fitbits`` here.
 - Every attempt writes one audit line on :data:`.bridge.AUDIT_LOGGER_NAME`:
   ``googleHealth/internalRevocations outcome=<ok|400|401|409|423|500|502|503|504>
-  actor=<24hex|-> participantId=<24hex|-> recordIds=<24hex[,24hex...]|->``.
-  Record ids only, never a token or ``healthUserId``.
+  actor=<24hex|-> participantId=<24hex|-> recordIds=<24hex[,24hex...]|->``,
+  plus `` owner=<24hex>`` on the shared-account 500. Record ids only, never a
+  token or ``healthUserId``.
+- Every GOOGLE_ACTIVE record goes under the participant lock and every
+  account lock, all-or-nothing (D-14): one live failure changes nothing.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Annotated
 
 import pymongo
@@ -42,15 +46,26 @@ from .oauth import GoogleHealthDeps
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _RevokeAttempt(_Attempt):
+    # The other participant holding the account, on the shared-account 500 only.
+    owner: str | None = None
+
+
 def _audit_revoke(
-    outcome: str, actor: str | None, participant_id: str | None, record_ids: tuple[str, ...]
+    outcome: str,
+    actor: str | None,
+    participant_id: str | None,
+    record_ids: tuple[str, ...],
+    owner: str | None = None,
 ) -> None:
     audit_logger.info(
-        "googleHealth/internalRevocations outcome=%s actor=%s participantId=%s recordIds=%s",
+        "googleHealth/internalRevocations outcome=%s actor=%s participantId=%s recordIds=%s%s",
         outcome,
         actor or "-",
         participant_id or "-",
         ",".join(record_ids) or "-",
+        f" owner={owner}" if owner else "",
     )
 
 
@@ -58,7 +73,7 @@ async def revoke_internal(
     request: Request,
     token: Annotated[str | None, Depends(require_bridge_credential)],
 ) -> Response:
-    attempt = _Attempt()
+    attempt = _RevokeAttempt()
     try:
         response = await _revoke_internal(request, token, attempt)
     except Exception as exc:
@@ -70,11 +85,14 @@ async def revoke_internal(
         attempt.actor,
         attempt.participant_id,
         attempt.record_ids,
+        attempt.owner,
     )
     return response
 
 
-async def _revoke_internal(request: Request, token: str | None, attempt: _Attempt) -> Response:
+async def _revoke_internal(
+    request: Request, token: str | None, attempt: _RevokeAttempt
+) -> Response:
     checked = await _bridge_request(request, token, attempt, typ=REVOKE_BRIDGE_TYP)
     if isinstance(checked, Response):
         return checked
@@ -85,7 +103,7 @@ async def _revoke_internal(request: Request, token: str | None, attempt: _Attemp
 
 
 def _revoke_result(
-    deps: GoogleHealthDeps, participant_id: str, actor: str, attempt: _Attempt
+    deps: GoogleHealthDeps, participant_id: str, actor: str, attempt: _RevokeAttempt
 ) -> Response:
     records = deps.store.active_google_records(participant_id)
     attempt.record_ids = tuple(record["id"] for record in records)
@@ -94,11 +112,24 @@ def _revoke_result(
     if not all(_nonempty(record["healthUserId"]) for record in records):
         # A contract breach for the operator to repair; never revoke blind.
         return boom(500, "An internal server error occurred")
-    locks = deps.tokens.acquire_locks(participant_id, records[0]["healthUserId"])
+    accounts = sorted({record["healthUserId"] for record in records})
+    locks = deps.tokens.acquire_locks(participant_id, *accounts)
     if locks is None:
         return boom(423, "Another change for this participant is in progress.")
     try:
-        for record in records:
+        # Re-read under the locks: finishAuth or the migration may have moved first.
+        locked = deps.store.active_google_records(participant_id)
+        if not locked:
+            return boom(409, "No Google Health account is linked for this participant.")
+        if tuple(record["id"] for record in locked) != attempt.record_ids:
+            return boom(423, "Another change for this participant is in progress.")
+        for account in accounts:
+            owner = deps.store.active_google_owner_of(account, other_than=participant_id)
+            if owner is not None:
+                # I2 breach: revoking would cut off the other participant too.
+                attempt.owner = owner
+                return boom(500, "An internal server error occurred")
+        for record in locked:
             token = next(
                 (t for t in (record["refreshToken"], record["accessToken"]) if _nonempty(t)),
                 None,

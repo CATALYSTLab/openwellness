@@ -98,7 +98,7 @@ class LinkClaim:
 
 @dataclass(frozen=True)
 class MigrationLocks:
-    """The participant and account locks one finishAuth holds (I3)."""
+    """The participant lock, then each account lock, one request holds (I3)."""
 
     keys: tuple[str, ...]
     token: str = field(repr=False)
@@ -261,33 +261,37 @@ class GoogleHealthTokens:
 
     # --- migration locks (I3) --------------------------------------------
 
-    def acquire_locks(self, participant_id: str, health_user_id: str) -> MigrationLocks | None:
-        """Take ``gh:lock:pid:<P>`` then ``gh:lock:hu:<hash>``, each ``SET NX PX``.
+    def acquire_locks(
+        self, participant_id: str, health_user_id: str, *more_health_user_ids: str
+    ) -> MigrationLocks | None:
+        """Take ``gh:lock:pid:<P>`` then one ``gh:lock:hu:<hash>`` per distinct
+        account, in sorted key order, each ``SET NX PX`` with no waiting.
 
-        ``None`` when either is held elsewhere or Redis fails; a participant
-        lock taken before a refused account lock is given back.
+        finishAuth and the migration pass one account; the revoke route passes
+        every account of the participant (opserver Phase 17.3, D-14). ``None``
+        when any key is held elsewhere or Redis fails; every key taken before
+        the refusal is given back.
         """
         token = secrets.token_urlsafe(16)
         ttl_ms = self._settings.lock_ttl_ms
         pid_key = PID_LOCK_KEY.format(participant_id=participant_id)
-        hu_key = account_lock_key(health_user_id)
-        try:
-            if not self._redis.set(pid_key, token, nx=True, px=ttl_ms):
+        hu_keys = sorted({account_lock_key(hu) for hu in (health_user_id, *more_health_user_ids)})
+        taken: list[str] = []
+        for key in (pid_key, *hu_keys):
+            try:
+                ok = bool(self._redis.set(key, token, nx=True, px=ttl_ms))
+            except Exception:
+                ok = False
+            if not ok:
+                for held in taken:
+                    self._release_owned(held, token)
                 return None
-        except Exception:
-            return None
-        try:
-            taken = bool(self._redis.set(hu_key, token, nx=True, px=ttl_ms))
-        except Exception:
-            taken = False
-        if not taken:
-            self._release_owned(pid_key, token)
-            return None
-        return MigrationLocks(keys=(pid_key, hu_key), token=token)
+            taken.append(key)
+        return MigrationLocks(keys=(pid_key, *hu_keys), token=token)
 
     def renew_locks(self, locks: MigrationLocks) -> bool:
-        """Restart both leases at ``lock_ttl_ms``, only while each still holds
-        this request's token. ``False`` when either was lost or Redis failed."""
+        """Restart every lease at ``lock_ttl_ms``, only while each still holds
+        this request's token. ``False`` when any was lost or Redis failed."""
         ttl_ms = self._settings.lock_ttl_ms
         try:
             with self._redis.pipeline() as pipe:
@@ -303,7 +307,7 @@ class GoogleHealthTokens:
             return False
 
     def holds_locks(self, locks: MigrationLocks) -> bool:
-        """Whether both keys still hold this request's token. ``False`` on a Redis failure."""
+        """Whether every key still holds this request's token. ``False`` on a Redis failure."""
         try:
             return all(_owned(self._redis.get(key), locks.token) for key in locks.keys)
         except Exception:
