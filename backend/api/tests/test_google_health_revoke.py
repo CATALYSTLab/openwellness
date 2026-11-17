@@ -11,6 +11,10 @@ them (D-01..D-03). Every attempt writes one audit line on
 from __future__ import annotations
 
 import dataclasses
+import logging
+import re
+import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -27,7 +31,13 @@ from openwellness_api.google_health.tokens import PID_LOCK_KEY, account_lock_key
 from .google_health_harness import Harness, make_settings
 from .test_google_health_bridge import (  # noqa: F401  (fixtures register by import)
     ACTOR,
+    BAD_BODIES,
+    NO_BEARER_TOKEN,
+    OTHER_PID,
+    OTHER_SECRET,
+    REFUSALS,
     _Collect,
+    _disabled_cases,
     audit,
     bearer,
     bridge_token,
@@ -606,3 +616,211 @@ def test_a_record_set_changed_under_the_locks_is_423(h: Harness) -> None:
     assert len(h.active_google(participantId=pid)) == 2
     assert h.db["fitbits"].count_documents({}) == before_change + 1
     assert h.redis.keys("gh:lock:*") == []
+
+
+# --- 17.3-02 Task 3: refusal, disabled-rule and bad-body matrices; one line per attempt ---
+
+# Each mint refusal re-signed as a revoke token where the case signs one (D-12).
+REVOKE_REFUSALS: dict[str, Callable[[Harness, str], dict[str, str]]] = {
+    "wrong_secret": lambda h, pid: bearer(revoke_token(pid, secret=OTHER_SECRET)),
+    "ow_access_token": REFUSALS["ow_access_token"],
+    "link_token": REFUSALS["link_token"],
+    "expired": lambda h, pid: bearer(
+        revoke_token(pid, iat=int(time.time()) - 120, exp=int(time.time()) - 60)
+    ),
+    "no_typ": lambda h, pid: bearer(revoke_token(pid, drop=("typ",))),
+    "wrong_typ": lambda h, pid: bearer(revoke_token(pid, typ="access")),
+    "wrong_aud": lambda h, pid: bearer(revoke_token(pid, aud="openwellness-api")),
+    "wrong_iss": lambda h, pid: bearer(revoke_token(pid, iss="openwellness-api")),
+    "lifetime_121": lambda h, pid: bearer(revoke_token(pid, lifetime=121)),
+    "pid_not_body": lambda h, pid: bearer(revoke_token(OTHER_PID)),
+    "sub_not_hex": lambda h, pid: bearer(revoke_token(pid, sub="coach-1")),
+    "hs512": lambda h, pid: bearer(revoke_token(pid, algorithm="HS512")),
+    "no_jti": lambda h, pid: bearer(revoke_token(pid, drop=("jti",))),
+    "basic_scheme": REFUSALS["basic_scheme"],
+    "empty_bearer": REFUSALS["empty_bearer"],
+    "mint_typ": lambda h, pid: bearer(bridge_token(pid)),
+}
+
+REVOKE_AUDIT_LINE = re.compile(
+    r"^googleHealth/internalRevocations outcome=(ok|400|401|409|423|500|502|503|504) "
+    r"actor=([0-9a-f]{24}|-) participantId=([0-9a-f]{24}|-) "
+    r"recordIds=([0-9a-f]{24}(,[0-9a-f]{24})*|-)( owner=[0-9a-f]{24})?$"
+)
+
+
+def test_revoke_refusals_mirror_the_mint_refusals() -> None:
+    assert set(REVOKE_REFUSALS) == (set(REFUSALS) - {"revoke_typ_on_links"}) | {"mint_typ"}
+
+
+@pytest.mark.parametrize("case", sorted(REVOKE_REFUSALS))
+def test_revoke_refusals(h: Harness, audit: _Collect, case: str) -> None:
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid, headers=REVOKE_REFUSALS[case](h, pid))
+
+    assert resp.status_code == 401, resp.text
+    assert resp.json() == {
+        "statusCode": 401,
+        "error": "Unauthorized",
+        "message": "Invalid bridge credential",
+    }
+    logged_pid = "-" if case in NO_BEARER_TOKEN else pid
+    assert audit.lines() == [
+        f"googleHealth/internalRevocations outcome=401 actor=- participantId={logged_pid} "
+        "recordIds=-"
+    ]
+    assert h.google.revokes == []
+    assert _fitbits(h) == before
+
+
+@pytest.mark.parametrize("rule", sorted(_disabled_cases(make_settings())))
+def test_revoke_disabled_answers_503(audit: _Collect, rule: str) -> None:
+    harness = Harness()
+    secret, rule_name = _disabled_cases(harness.settings)[rule]
+    h = with_bridge(harness, secret=secret)
+    assert h.app.state.google_health_bridge.disabled == (rule_name,)
+    pid = h.seed_participant()
+    h.seed_google(pid, health_user_id="hu-1", migrated_at=1_790_000_000)
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {
+        "statusCode": 503,
+        "error": "Service Unavailable",
+        "message": "Google Health is not available.",
+    }
+    assert audit.lines() == [
+        "googleHealth/internalRevocations outcome=503 actor=- participantId=- recordIds=-"
+    ]
+    assert h.google.revokes == []
+    assert _fitbits(h) == before
+
+
+@pytest.mark.parametrize("body", sorted(BAD_BODIES))
+def test_revoke_bad_body_is_400(h: Harness, audit: _Collect, body: str) -> None:
+    pid = h.seed_participant()
+    kwargs = BAD_BODIES[body](pid)
+    headers = {**kwargs.pop("headers", {}), **bearer(revoke_token(pid))}
+
+    resp = h.client().post(REVOKE_PATH, headers=headers, **kwargs)
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json() == {
+        "statusCode": 400,
+        "error": "Bad Request",
+        "message": "Invalid request payload input",
+    }
+    assert audit.lines() == [
+        "googleHealth/internalRevocations outcome=400 actor=- participantId=- recordIds=-"
+    ]
+
+
+def test_revoke_missing_credential_is_401_before_503(audit: _Collect) -> None:
+    h = with_bridge(Harness(), secret="")
+    pid = h.seed_participant()
+
+    resp = _revoke(h, pid, headers={})
+
+    assert resp.status_code == 401, resp.text
+    assert audit.lines() == [
+        "googleHealth/internalRevocations outcome=401 actor=- participantId=- recordIds=-"
+    ]
+
+
+def test_revoke_missing_credential_is_401_before_400(h: Harness, audit: _Collect) -> None:
+    resp = h.client().post(REVOKE_PATH, json={"participantId": "not-hex"})
+
+    assert resp.status_code == 401, resp.text
+    assert audit.lines() == [
+        "googleHealth/internalRevocations outcome=401 actor=- participantId=- recordIds=-"
+    ]
+
+
+def _seeded(h: Harness, n: int) -> str:
+    pid = h.seed_participant()
+    h.seed_google(
+        pid,
+        health_user_id=f"hu-{n}",
+        migrated_at=1_790_000_000,
+        refresh_token=f"refresh-{n}",
+        access_token=f"access-{n}",
+    )
+    return pid
+
+
+def test_every_revoke_outcome_writes_exactly_one_matching_line(audit: _Collect) -> None:
+    h = with_bridge(Harness())
+    client = h.client()
+    ok, busy, bad_gateway, timeout = (_seeded(h, n) for n in range(1, 5))
+    h.redis.set(PID_LOCK_KEY.format(participant_id=busy), "another-owner", px=60000)
+    h.google.revoke_errors["refresh-3"] = "revoke_failed"
+    h.google.revoke_errors["refresh-4"] = "revoke_timeout"
+    shared, owner = h.seed_participant(), h.seed_participant()
+    for pid in (shared, owner):
+        h.seed_google(pid, health_user_id="hu-shared", migrated_at=1_790_000_000)
+    disabled = with_bridge(Harness(), secret="")
+    off = disabled.seed_participant()
+
+    def post(pid: str, **kwargs: Any) -> int:
+        kwargs.setdefault("json", {"participantId": pid})
+        kwargs.setdefault("headers", bearer(revoke_token(pid)))
+        return client.post(REVOKE_PATH, **kwargs).status_code
+
+    attempts: list[Callable[[], int]] = [
+        lambda: post(ok),
+        lambda: post(ok, headers={}),
+        lambda: post(ok, json={"participantId": "nope"}),
+        lambda: post(ok),
+        lambda: post(busy),
+        lambda: post(bad_gateway),
+        lambda: post(timeout),
+        lambda: post(shared),
+        lambda: _revoke(disabled, off).status_code,
+    ]
+    statuses = []
+    for n, attempt in enumerate(attempts, start=1):
+        statuses.append(attempt())
+        assert len(audit.lines()) == n
+
+    assert statuses == [204, 401, 400, 409, 423, 502, 504, 500, 503]
+    lines = audit.lines()
+    assert all(REVOKE_AUDIT_LINE.match(line) for line in lines), lines
+    assert [line for line in lines if " owner=" in line] == [lines[7]]
+    assert lines[7].endswith(f" owner={owner}")
+
+
+def test_no_revoke_log_record_carries_a_token(
+    h: Harness, audit: _Collect, caplog: pytest.LogCaptureFixture
+) -> None:
+    health_user_id = "health-user-id-never-logged"
+    done, failing = h.seed_participant(), h.seed_participant()
+    for n, pid in enumerate((done, failing), start=1):
+        h.seed_google(
+            pid,
+            health_user_id=f"{health_user_id}-{n}",
+            migrated_at=1_790_000_000,
+            refresh_token=f"refresh-never-logged-{n}",
+            access_token=f"access-never-logged-{n}",
+        )
+    session = _StubSession(200, {})
+    _with_real_client(h, session)
+    tokens = [revoke_token(done), revoke_token(failing)]
+
+    with caplog.at_level(logging.DEBUG):
+        first = _revoke(h, done, headers=bearer(tokens[0]))
+        session.status_code = 400
+        session.body = {"error": "invalid_request", "error_description": "refresh-never-logged-2"}
+        second = _revoke(h, failing, headers=bearer(tokens[1]))
+
+    assert (first.status_code, second.status_code) == (204, 502)
+    assert len(audit.records) == 2
+    messages = [r.getMessage() for r in (*caplog.records, *audit.records)]
+    secrets = [*tokens, health_user_id, "refresh-never-logged", "access-never-logged"]
+    for message in messages:
+        for secret in [*secrets, "error_description"]:
+            assert secret not in message, message
