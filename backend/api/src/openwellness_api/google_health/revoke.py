@@ -136,6 +136,9 @@ def _revoke_result(
             )
             if token is None:
                 continue
+            # The locks are leases: earlier calls may have outlived them (as in finishAuth).
+            if not deps.tokens.renew_locks(locks):
+                return boom(423, "Another change for this participant is in progress.")
             try:
                 deps.google.revoke(token)
             except GoogleOAuthError as exc:
@@ -144,6 +147,9 @@ def _revoke_result(
                     return boom(504, "Google did not answer in time.")
                 if exc.kind != "revoke_token_invalid":
                     return boom(502, "Google did not confirm the revocation.")
+        # The write budget is half a lease, so it ends inside the renewed one.
+        if not deps.tokens.renew_locks(locks):
+            return boom(423, "Another change for this participant is in progress.")
         with pymongo.timeout(deps.settings.store_write_budget_seconds):
             deps.store.end_revoked(
                 participant_id, list(attempt.record_ids), actor, int(deps.clock())

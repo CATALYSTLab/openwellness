@@ -39,7 +39,7 @@ As a coach, I want the dashboard to say "revoked" only when Google has stopped t
 - THE system SHALL ask Google to revoke the grant of every GOOGLE_ACTIVE record of the participant before ending any of them, preferring the refresh token. (GHR-03, D-05, D-14)
 - WHEN Google answers 200, or 400 with `invalid_token` or `invalid_grant` (the grant is already dead), THE system SHALL count that grant as revoked.
 - WHEN Google times out THE system SHALL answer 504 `Google did not answer in time.`; WHEN Google fails in any other way THE system SHALL answer 502 `Google did not confirm the revocation.`; in both cases THE system SHALL change no record, including records whose grant Google already revoked in this request.
-- THE system SHALL hold the participant lock and the lock of every account involved while it calls Google and writes. WHEN any lock is busy, or the records change between the first read and the read under the locks, THE system SHALL answer 423 `Another change for this participant is in progress.` and change nothing.
+- THE system SHALL hold the participant lock and the lock of every account involved while it calls Google and writes. WHEN any lock is busy, a lock lease is lost before a Google call or the write, or the records change between the first read and the read under the locks, THE system SHALL answer 423 `Another change for this participant is in progress.` and change nothing.
 - WHEN another participant holds one of the accounts GOOGLE_ACTIVE (an I2 breach), THE system SHALL answer 500 without calling Google, because the revoke is grant-wide and would cut that participant off too.
 
 ### Story 4: The record ends and is kept

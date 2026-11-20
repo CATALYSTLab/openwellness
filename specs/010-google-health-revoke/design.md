@@ -70,8 +70,8 @@ The route sends the refresh token, or the access token when there is no refresh 
 2. Take the locks with `SET NX PX` and no waiting: `gh:lock:pid:<P>` first, then one `gh:lock:hu:<hash>` per distinct account, in sorted key order. finishAuth and the migration take the same keys in the same order, so no two of them deadlock. Any key busy, or Redis failing: 423, and every key already taken is given back.
 3. Re-read under the locks. No records: 409. A different set of record ids: 423, because finishAuth or the migration moved first.
 4. The I2 refusal: for each account, if another participant holds it GOOGLE_ACTIVE, answer 500 with ` owner=<24hex>` on the audit line and call Google for none of them.
-5. Call Google for each record. Any live failure (504 or 502) stops the loop and nothing is written, even for grants Google already revoked in this request.
-6. Every grant is dead: one `end_revoked` writes all records, with `pymongo.timeout(store_write_budget_seconds)`.
+5. Call Google for each record. Any live failure (504 or 502) stops the loop and nothing is written, even for grants Google already revoked in this request. The locks are leases of `lock_ttl_ms` (60 s) and several Google calls can outlive them, so each call is preceded by an owner-checked `renew_locks`, as in finishAuth; a lost lease answers 423 and writes nothing.
+6. Every grant is dead: renew the leases once more (lost: 423, nothing written), then one `end_revoked` writes all records, with `pymongo.timeout(store_write_budget_seconds)`, half a lease.
 7. Release the locks (in `finally`) and answer 204.
 
 All or nothing means a coach's retry meets the same records. A retry after a partial Google success finds the already revoked grants dead (`invalid_token`) and ends them.
@@ -111,7 +111,7 @@ googleHealth/internalRevocations outcome=<ok|400|401|409|423|500|502|503|504> ac
 | bad body | 400 | `400` | none |
 | bad credential, including a mint token | 401 | `401` | none |
 | nothing linked, before or under the locks | 409 | `409` | none |
-| a lock busy, Redis failing, or the record set changed under the locks | 423 | `423` | none |
+| a lock busy, Redis failing, a lease lost before a Google call or the write, or the record set changed under the locks | 423 | `423` | none |
 | shared account, missing `healthUserId`, Mongo write failure or handler failure | 500 | `500` | none |
 | Google failed other than a timeout | 502 | `502` | none |
 | route disabled | 503 | `503` | none |

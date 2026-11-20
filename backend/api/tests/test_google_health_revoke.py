@@ -618,6 +618,46 @@ def test_a_record_set_changed_under_the_locks_is_423(h: Harness) -> None:
     assert h.redis.keys("gh:lock:*") == []
 
 
+@pytest.mark.parametrize(
+    ("lost_after", "called"),
+    [
+        # Caught before the next Google call.
+        ("old-google-refresh", ["old-google-refresh"]),
+        # Caught before the write.
+        ("second-refresh", ["old-google-refresh", "second-refresh"]),
+    ],
+)
+def test_a_lease_lost_during_the_revoke_is_423_and_writes_nothing(
+    h: Harness, audit: _Collect, lost_after: str, called: list[str]
+) -> None:
+    pid = h.seed_participant()
+    first, second = _seed_two(h, pid, second_hu="hu-2")
+    key = account_lock_key("hu-2")
+    revoke = h.google.revoke
+
+    def revoke_then_lease_lapses(token: str) -> None:
+        revoke(token)
+        if token == lost_after:
+            # The lease expired during the call and another request took the key.
+            h.redis.set(key, "another-owner", px=60000)
+
+    h.google.revoke = revoke_then_lease_lapses  # type: ignore[method-assign]
+    before = _fitbits(h)
+
+    resp = _revoke(h, pid)
+
+    assert resp.status_code == 423
+    assert resp.json() == _BUSY
+    assert h.google.revokes == called
+    assert _fitbits(h) == before
+    assert h.redis.keys("gh:lock:*") == [key]
+    assert h.redis.get(key) == "another-owner"
+    assert audit.lines() == [
+        f"googleHealth/internalRevocations outcome=423 actor={ACTOR} participantId={pid} "
+        f"recordIds={first},{second}"
+    ]
+
+
 # --- 17.3-02 Task 3: refusal, disabled-rule and bad-body matrices; one line per attempt ---
 
 # Each mint refusal re-signed as a revoke token where the case signs one (D-12).
