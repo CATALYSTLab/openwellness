@@ -226,6 +226,8 @@ REFUSALS: dict[str, Callable[[Harness, str], dict[str, str]]] = {
     "no_jti": lambda h, pid: bearer(bridge_token(pid, drop=("jti",))),
     "basic_scheme": lambda h, pid: {"Authorization": "Basic c2Vzc2lvbjprZXk="},
     "empty_bearer": lambda h, pid: {"Authorization": "Bearer "},
+    # A valid revoke credential never mints a link (opserver Phase 17.3, D-12).
+    "revoke_typ_on_links": lambda h, pid: bearer(bridge_token(pid, typ="gh-revoke-bridge")),
 }
 NO_BEARER_TOKEN = {"basic_scheme", "empty_bearer"}
 

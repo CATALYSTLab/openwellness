@@ -1,4 +1,4 @@
-"""The ``fitbits`` writes and reads finishAuth needs.
+"""The ``fitbits`` writes and reads finishAuth and the revoke route need.
 
 Every filter comes from :mod:`openwellness_core.domain.models.fitbit` (10.1-17),
 so ``ow_api``, OpenWellness core, frame and the scheduler agree on which
@@ -90,3 +90,39 @@ class GoogleHealthStore:
             )
             if doc.get("ownerId") is not None
         ]
+
+    def active_google_records(self, participant_id: str) -> list[dict[str, Any]]:
+        """The participant's GOOGLE_ACTIVE records, oldest ``_id`` first (revoke, Phase 17.3).
+
+        Each is ``{"id", "healthUserId", "refreshToken", "accessToken"}``. The
+        result carries tokens and must never be logged.
+        """
+        return [
+            {
+                "id": str(doc["_id"]),
+                "healthUserId": doc.get("healthUserId"),
+                "refreshToken": doc.get("refreshToken"),
+                "accessToken": doc.get("accessToken"),
+            }
+            for doc in self._fitbits.find(
+                {"participantId": participant_id, **google_active_filter()},
+                {"_id": 1, "healthUserId": 1, "refreshToken": 1, "accessToken": 1},
+            ).sort("_id", 1)
+        ]
+
+    def end_revoked(
+        self, participant_id: str, record_ids: list[str], actor: str, at: int
+    ) -> int:
+        """End revoked GOOGLE_ACTIVE records; the documents and tokens stay (D-01..D-03).
+
+        Returns the matched count. Fewer than ``len(record_ids)`` means another
+        writer ended a record first; the grant is dead either way.
+        """
+        query = {
+            "participantId": participant_id,
+            **google_active_filter(),
+            "_id": {"$in": [ObjectId(i) for i in record_ids]},
+        }
+        ended = {"supersededAt": at, "supersededBy": None, "revokedAt": at, "revokedBy": actor}
+        result = self._fitbits.update_many(query, {"$set": ended})
+        return int(result.matched_count)

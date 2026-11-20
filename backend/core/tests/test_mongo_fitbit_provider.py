@@ -48,6 +48,8 @@ D13_SNAKE = (
     "last_sync_at",
     "devices",
     "devices_fetched_at",
+    "revoked_at",
+    "revoked_by",
 )
 
 
@@ -269,6 +271,8 @@ CONTRACT_D13 = (
     "lastSyncAt",
     "devices",
     "devicesFetchedAt",
+    "revokedAt",
+    "revokedBy",
 )
 
 
@@ -399,6 +403,8 @@ GOOGLE_VALUES: dict[str, Any] = {
     "last_sync_at": 1_791_000_000,
     "devices": [DEVICE],
     "devices_fetched_at": 1_791_000_100,
+    "revoked_at": 1_791_000_300,
+    "revoked_by": "5f0c0ffee0c0ffee0c0ffee0",
 }
 ALIAS_OF: dict[str, str] = dict(zip(D13_SNAKE, CONTRACT_D13))
 
@@ -439,6 +445,25 @@ def test_mongo_fitbit_round_trips_d13_fields_by_alias():
     entity = model.to_domain(Fitbit)
     for name, value in GOOGLE_VALUES.items():
         assert getattr(entity, name) == value, name
+
+
+def test_a_revoked_google_record_is_not_active():
+    # ow_api's coach revoke (Phase 17.3) ends the record this way (D-02).
+    fake, repo = make_repo()
+    revoked_id = fake.db.fitbits.insert_one(
+        google_doc(
+            supersededAt=1_791_000_300,
+            supersededBy=None,
+            revokedAt=1_791_000_300,
+            revokedBy="5f0c0ffee0c0ffee0c0ffee0",
+        )
+    ).inserted_id
+
+    loaded = repo.get_by_id(str(revoked_id))
+    assert loaded is not None
+    assert loaded.revoked_at == 1_791_000_300
+    assert loaded.revoked_by == "5f0c0ffee0c0ffee0c0ffee0"
+    assert repo.get_by_participant_id(P) is None
 
 
 def test_saving_a_loaded_google_record_keeps_a_newer_scheduler_snapshot():

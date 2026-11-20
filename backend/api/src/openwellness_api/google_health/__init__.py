@@ -1,7 +1,8 @@
-"""Google Health in ``ow_api`` (opserver Phase 10.1, GHA-01, GHA-02; Phase 16, GHB-02).
+"""Google Health in ``ow_api`` (opserver Phase 10.1, GHA-01, GHA-02; Phase 16, GHB-02;
+Phase 17.3, GHR-02).
 
-Four routes under the edge group ``/api/googleHealth`` (D-05), and one
-internal route outside ``/api/``:
+Four routes under the edge group ``/api/googleHealth`` (D-05), and two
+internal routes outside ``/api/``:
 
 - ``POST /api/googleHealth/links``: staff mint a participant-bound link.
   Router-level ``require_write_principal`` plus the ``admin`` role, behind
@@ -21,6 +22,10 @@ internal route outside ``/api/``:
   ``require_write_principal`` and not by the unauthenticated marker; edge
   never routes the path. It answers Boom JSON and writes one audit line per
   attempt (:mod:`.bridge`).
+- ``POST /internal/googleHealth/revocations``: frame revokes a participant's
+  Google Health grants for a coach (opserver Phase 17.3). Same bridge guard
+  with its own ``typ`` (D-12); Boom JSON and one audit line per attempt
+  (:mod:`.revoke`).
 
 The routes read ``app.state.google_health_deps``, built in the lifespan by
 :func:`build_google_health_deps`. While a required setting is unset or
@@ -40,7 +45,7 @@ from ..errors.responses import build_error
 from ..event_handlers.celery_producer import CeleryTaskPublisher, ProducerSettings
 from ..event_handlers.mongo_readers import MongoParticipantReader
 from ..event_handlers.ports import TaskPublisher
-from .bridge import INTERNAL_LINKS_PATH, build_bridge_deps, create_link_internal
+from .bridge import INTERNAL_LINKS_PATH, REVOKE_PATH, build_bridge_deps, create_link_internal
 from .google_client import GoogleOAuthClient, RequestsGoogleOAuthClient
 from .notifications import build_notifications_router
 from .oauth import (
@@ -50,6 +55,7 @@ from .oauth import (
     finish_auth,
     get_google_health_deps,
 )
+from .revoke import revoke_internal
 from .settings import GoogleHealthSettings
 from .signature import SignatureVerifier, TinkSignatureVerifier
 from .store import GoogleHealthStore
@@ -63,6 +69,7 @@ FINISH_AUTH_PATH = "/api/googleHealth/finishAuth"
 
 __all__ = [
     "INTERNAL_LINKS_PATH",
+    "REVOKE_PATH",
     "GoogleHealthDeps",
     "build_bridge_deps",
     "build_google_health_deps",
@@ -111,6 +118,7 @@ def build_google_health_router() -> APIRouter:
     internal.add_api_route(
         INTERNAL_LINKS_PATH, create_link_internal, methods=["POST"], include_in_schema=False
     )
+    internal.add_api_route(REVOKE_PATH, revoke_internal, methods=["POST"], include_in_schema=False)
 
     router = APIRouter()
     router.include_router(staff)

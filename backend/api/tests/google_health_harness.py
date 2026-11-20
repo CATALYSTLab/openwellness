@@ -69,6 +69,8 @@ class FakeGoogleOAuthClient:
 
     ``identity_gate`` maps an access token to an event ``get_identity`` waits
     on, so a threaded test can hold a request inside the identity call.
+    ``revoke_errors`` maps a token to the ``GoogleOAuthError`` kind ``revoke``
+    raises after recording it.
     """
 
     grants: dict[str, TokenGrant] = field(default_factory=dict)
@@ -76,6 +78,7 @@ class FakeGoogleOAuthClient:
     exchanges: list[str] = field(default_factory=list)
     identity_calls: list[str] = field(default_factory=list)
     revokes: list[str] = field(default_factory=list)
+    revoke_errors: dict[str, str] = field(default_factory=dict)
     identity_gate: dict[str, threading.Event] = field(default_factory=dict)
     identity_entered: dict[str, threading.Event] = field(default_factory=dict)
     fail_identity: bool = False
@@ -126,6 +129,9 @@ class FakeGoogleOAuthClient:
     def revoke(self, token: str) -> None:
         with self._lock:
             self.revokes.append(token)
+        kind = self.revoke_errors.get(token)
+        if kind is not None:
+            raise GoogleOAuthError(kind)
 
 
 @dataclass
@@ -196,23 +202,32 @@ class Harness:
         return str(result.inserted_id)
 
     def seed_google(
-        self, participant_id: str, *, health_user_id: str, migrated_at: int
+        self,
+        participant_id: str,
+        *,
+        health_user_id: str,
+        migrated_at: int,
+        refresh_token: str | None = "old-google-refresh",
+        access_token: str | None = "old-google-access",
     ) -> str:
-        result = self.db["fitbits"].insert_one(
-            {
-                "participantId": participant_id,
-                "provider": "googleHealth",
-                "accessToken": "old-google-access",
-                "refreshToken": "old-google-refresh",
-                "expiresAt": migrated_at + 3600,
-                "scope": FULL_SCOPE,
-                "healthUserId": health_user_id,
-                "legacyUserId": None,
-                "timeCreated": migrated_at,
-                "migratedAt": migrated_at,
-                "migrationStatus": "complete",
-            }
-        )
+        """A GOOGLE_ACTIVE record; a ``None`` token leaves that field out."""
+        doc: dict[str, Any] = {
+            "participantId": participant_id,
+            "provider": "googleHealth",
+            "accessToken": access_token,
+            "refreshToken": refresh_token,
+            "expiresAt": migrated_at + 3600,
+            "scope": FULL_SCOPE,
+            "healthUserId": health_user_id,
+            "legacyUserId": None,
+            "timeCreated": migrated_at,
+            "migratedAt": migrated_at,
+            "migrationStatus": "complete",
+        }
+        for name in ("accessToken", "refreshToken"):
+            if doc[name] is None:
+                del doc[name]
+        result = self.db["fitbits"].insert_one(doc)
         return str(result.inserted_id)
 
     # --- the three steps ------------------------------------------------------

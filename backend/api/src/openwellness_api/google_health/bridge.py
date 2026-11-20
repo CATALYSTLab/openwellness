@@ -37,13 +37,16 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from ..event_handlers.hapi import boom
-from .oauth import _mint_link_result, get_google_health_deps
+from .oauth import GoogleHealthDeps, _mint_link_result, get_google_health_deps
 from .settings import _MIN_SECRET_LENGTH, GoogleHealthSettings
 
 INTERNAL_LINKS_PATH: Final = "/internal/googleHealth/links"
 BRIDGE_ISSUER: Final = "frame"
 BRIDGE_AUDIENCE: Final = "ow-bridge"
 BRIDGE_TYP: Final = "gh-link-bridge"
+# opserver Phase 17.3: the revoke route, its own typ so a mint token cannot revoke (D-12).
+REVOKE_PATH: Final = "/internal/googleHealth/revocations"
+REVOKE_BRIDGE_TYP: Final = "gh-revoke-bridge"
 MAX_LIFETIME_SECONDS: Final = 120
 LEEWAY_SECONDS: Final = 5
 AUDIT_LOGGER_NAME: Final = "openwellness_api.audit.google_health"
@@ -122,7 +125,9 @@ class BridgeVerifier:
     def __init__(self, secret: str) -> None:
         self._secret = secret
 
-    def verify(self, token: str | None, *, participant_id: str) -> BridgeClaims:
+    def verify(
+        self, token: str | None, *, participant_id: str, typ: str = BRIDGE_TYP
+    ) -> BridgeClaims:
         if not token:
             raise BridgeTokenError()
         try:
@@ -140,7 +145,7 @@ class BridgeVerifier:
         exp, iat = claims.get("exp"), claims.get("iat")
         sub, pid = claims.get("sub"), claims.get("pid")
         if (
-            claims.get("typ") != BRIDGE_TYP
+            claims.get("typ") != typ
             or not isinstance(exp, int)
             or isinstance(exp, bool)
             or not isinstance(iat, int)
@@ -253,6 +258,7 @@ class _Attempt:
     actor: str | None = None
     participant_id: str | None = None
     expires_at: int | None = None
+    record_ids: tuple[str, ...] = ()
 
 
 async def create_link_internal(
@@ -275,9 +281,14 @@ async def create_link_internal(
     return response
 
 
-async def _create_link_internal(
-    request: Request, token: str | None, attempt: _Attempt
-) -> Response:
+async def _bridge_request(
+    request: Request, token: str | None, attempt: _Attempt, *, typ: str
+) -> tuple[GoogleHealthDeps, BridgeClaims] | Response:
+    """The checks every internal route shares: credential, config, body, JWT.
+
+    A ``Response`` is the refusal to send; otherwise the deps and the verified
+    claims. Sets ``attempt.participant_id`` and ``attempt.actor`` as each is known.
+    """
     # No bearer token at all: refuse before the 503 and the body checks, so
     # a caller without one learns nothing about configuration and cannot put
     # a participantId into the audit line.
@@ -303,10 +314,20 @@ async def _create_link_internal(
     assert isinstance(participant_id, str)
     attempt.participant_id = participant_id
     try:
-        claims = bridge.verifier.verify(token, participant_id=participant_id)
+        claims = bridge.verifier.verify(token, participant_id=participant_id, typ=typ)
     except BridgeTokenError:
         return boom(401, "Invalid bridge credential")
     attempt.actor = claims.actor
-    response, expires_at = await run_in_threadpool(_mint_link_result, deps, participant_id)
+    return deps, claims
+
+
+async def _create_link_internal(
+    request: Request, token: str | None, attempt: _Attempt
+) -> Response:
+    checked = await _bridge_request(request, token, attempt, typ=BRIDGE_TYP)
+    if isinstance(checked, Response):
+        return checked
+    deps, claims = checked
+    response, expires_at = await run_in_threadpool(_mint_link_result, deps, claims.participant_id)
     attempt.expires_at = expires_at
     return response

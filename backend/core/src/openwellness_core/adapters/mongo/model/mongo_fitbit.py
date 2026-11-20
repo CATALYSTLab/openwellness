@@ -40,3 +40,6 @@ class MongoFitbit(MongoBaseEntity):
     last_sync_at: Any = Field(alias="lastSyncAt", default=None)
     devices: Any = Field(alias="devices", default=None)
     devices_fetched_at: Any = Field(alias="devicesFetchedAt", default=None)
+    # Written by ow_api's coach revoke (Phase 17.3) when it ends a Google record.
+    revoked_at: Any = Field(alias="revokedAt", default=None)
+    revoked_by: Any = Field(alias="revokedBy", default=None)

@@ -5,9 +5,10 @@ the externally registered event-handler contracts (HOOK-01/02), which answer
 Sync Gateway and vendor webhooks exactly as frame's ``auth: false`` routes do.
 
 A third, reviewed category is bridge-guarded: the Google Health internal links
-route (opserver Phase 16) takes a per-request bridge JWT from frame through
-``require_bridge_credential`` instead of a ``require_write_principal`` bearer.
-It is never unauthenticated and edge never routes its path.
+route (opserver Phase 16) and internal revocations route (opserver Phase 17.3)
+take a per-request bridge JWT from frame through ``require_bridge_credential``
+instead of a ``require_write_principal`` bearer. Neither is unauthenticated and
+edge never routes their paths.
 """
 
 from __future__ import annotations
@@ -56,9 +57,11 @@ EXPECTED_READ_ONLY = {
     "/v1/studies:lookup",
 }
 
-# Routes guarded by the frame -> ow bridge JWT (opserver Phase 16, D-01..D-03).
+# Routes guarded by the frame -> ow bridge JWT (opserver Phase 16, D-01..D-03;
+# Phase 17.3, D-12).
 EXPECTED_BRIDGE_GUARDED = {
     "/internal/googleHealth/links",
+    "/internal/googleHealth/revocations",
 }
 
 
